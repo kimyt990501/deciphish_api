@@ -1,0 +1,119 @@
+version: '3.8'
+
+services:
+  # MySQL 데이터베이스 (운영 환경)
+  mysql:
+    image: mysql:8.0
+    container_name: phishing-detector-mysql-prod
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DB:-phishing_detector}
+      MYSQL_USER: ${MYSQL_USER:-phishing_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-phishing_password}
+      TZ: Asia/Seoul
+    ports:
+      - "33306:3306"
+    volumes:
+      - mysql_data_prod:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d
+    restart: always
+    networks:
+      - phishing-detector-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+
+  phishing-detector-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    container_name: phishing-detector-api-prod
+    ports:
+      - "8300:8300"
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=info
+      - TZ=Asia/Seoul
+      # MySQL 연결 설정
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=${MYSQL_USER:-phishing_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-phishing_password}
+      - MYSQL_DB=${MYSQL_DB:-phishing_detector}
+    volumes:
+      # 로그 디렉토리 마운트
+      - ./logs:/app/logs
+      # 환경 변수 파일 마운트
+      - ./.env:/app/.env:ro
+      # 모델 파일 마운트 (이미지 크기 절약)
+      - ./app/services/crp_classifier/models:/app/app/services/crp_classifier/models:ro
+      - ./app/services/favicon_service/data:/app/app/services/favicon_service/data:ro
+    restart: always
+    depends_on:
+      - mysql
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8300/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - phishing-detector-network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+
+  # phpMyAdmin (운영 환경용)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: phishing-detector-phpmyadmin-prod
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: ${MYSQL_USER:-phishing_user}
+      PMA_PASSWORD: ${MYSQL_PASSWORD:-phishing_password}
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql
+    restart: always
+    networks:
+      - phishing-detector-network
+    profiles:
+      - with-phpmyadmin
+
+  # Nginx 리버스 프록시 (선택사항)
+  nginx:
+    image: nginx:alpine
+    container_name: phishing-detector-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - phishing-detector-api
+    restart: always
+    networks:
+      - phishing-detector-network
+    profiles:
+      - with-nginx
+
+volumes:
+  mysql_data_prod:
+
+networks:
+  phishing-detector-network:
+    driver: bridge 

@@ -1,0 +1,75 @@
+# 환경 설정
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 가상환경
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 로그 파일
+logs/
+*.log
+
+# 데이터베이스
+*.db
+*.sqlite3
+
+# 임시 파일
+*.tmp
+*.temp
+
+# 대용량 ML 모델 파일들
+app/services/crp_classifier/models/
+*.safetensors
+*.bin
+*.pth
+*.pt
+*.model
+*.h5
+*.pkl
+*.pickle
+
+# 캐시 파일
+.cache/
+*.cache
+
+# OS 생성 파일
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

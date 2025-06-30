@@ -1,0 +1,57 @@
+# 멀티스테이지 빌드를 위한 베이스 이미지
+FROM python:3.10.18-slim as base
+
+# 시스템 패키지 업데이트 및 필요한 패키지 설치
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    git \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgcc-s1 \
+    curl \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# 한국 시간대 설정
+ENV TZ=Asia/Seoul
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# Python 의존성 파일 복사 (캐시 레이어 최적화)
+COPY requirements.txt .
+
+# Python 패키지 설치 (캐시 최적화)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# 환경 변수 파일 복사
+COPY .env .
+
+# 애플리케이션 코드 복사 (모델 파일 제외)
+COPY app/ ./app/
+
+# 모델 디렉토리 생성 (볼륨 마운트용)
+RUN mkdir -p /app/app/services/crp_classifier/models \
+    && mkdir -p /app/app/services/favicon_service/data
+
+# 포트 노출
+EXPOSE 8300
+
+# 환경 변수 설정
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# 헬스체크 추가
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8300/api/v1/health || exit 1
+
+# 서버 실행
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8300", "--log-level", "info"] 

@@ -1,0 +1,1 @@
+# Text Extractor Ollama Package 
