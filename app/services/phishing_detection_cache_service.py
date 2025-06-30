@@ -38,7 +38,7 @@ class PhishingDetectionCacheService:
                 cutoff_time = datetime.now() - timedelta(hours=self.cache_ttl_hours)
                 
                 query = text("""
-                SELECT url, is_phish, reason, detected_brand, confidence, created_at
+                SELECT url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64
                 FROM phishing_detections 
                 WHERE url = :url AND created_at > :cutoff_time
                 ORDER BY created_at DESC 
@@ -50,7 +50,7 @@ class PhishingDetectionCacheService:
                 
                 if row:
                     logger.info(f"캐시된 결과 조회 성공: {url}")
-                    return {
+                    result_dict = {
                         "url": row[0],
                         "is_phish": row[1],
                         "reason": row[2],
@@ -59,6 +59,16 @@ class PhishingDetectionCacheService:
                         "cached_at": row[5].isoformat(),
                         "from_cache": True
                     }
+                    
+                    # 스크린샷이 있으면 포함
+                    if row[6]:  # screenshot_base64
+                        result_dict["screenshot_base64"] = row[6]
+                        result_dict["has_screenshot"] = True
+                        result_dict["screenshot_size"] = len(row[6])
+                    else:
+                        result_dict["has_screenshot"] = False
+                    
+                    return result_dict
                 else:
                     logger.info(f"캐시된 결과 없음: {url}")
                     return None
@@ -68,7 +78,7 @@ class PhishingDetectionCacheService:
             return None
     
     async def save_detection_result(self, url: str, html_content: str, favicon_base64: str, 
-                                  detection_result: dict, user_id: int = None, ip_address: str = None, user_agent: str = None) -> bool:
+                                  detection_result: dict, user_id: int = None, ip_address: str = None, user_agent: str = None, screenshot_base64: str = None) -> bool:
         """
         피싱 검사 결과를 데이터베이스에 저장
         
@@ -116,8 +126,8 @@ class PhishingDetectionCacheService:
                 
                 query = text("""
                 INSERT INTO phishing_detections 
-                (user_id, url, is_phish, reason, detected_brand, confidence, html_content, favicon_base64, ip_address, user_agent, is_redirect, redirect_url, is_crp)
-                VALUES (:user_id, :url, :is_phish, :reason, :detected_brand, :confidence, :html_content, :favicon_base64, :ip_address, :user_agent, :is_redirect, :redirect_url, :is_crp)
+                (user_id, url, is_phish, reason, detected_brand, confidence, html_content, favicon_base64, screenshot_base64, ip_address, user_agent, is_redirect, redirect_url, is_crp)
+                VALUES (:user_id, :url, :is_phish, :reason, :detected_brand, :confidence, :html_content, :favicon_base64, :screenshot_base64, :ip_address, :user_agent, :is_redirect, :redirect_url, :is_crp)
                 """)
                 
                 # 새로운 칼럼들 값 계산
@@ -134,16 +144,18 @@ class PhishingDetectionCacheService:
                     "confidence": detection_result.get("similarity", detection_result.get("confidence", 0.0)),
                     "html_content": html_content[:65535] if html_content else "",  # TEXT 크기 제한
                     "favicon_base64": favicon_base64[:65535] if favicon_base64 else "",  # TEXT 크기 제한
+                    "screenshot_base64": screenshot_base64 if screenshot_base64 else "",  # 스크린샷 Base64
                     "ip_address": ip_address,
                     "user_agent": user_agent[:1000] if user_agent else None,  # 크기 제한
                     "is_redirect": is_redirect,
-                    "redirect_url": redirect_url[:500] if redirect_url else None,  # URL 크기 제한
+                    "redirect_url": redirect_url,  # TEXT 컬럼으로 변경했으므로 크기 제한 제거
                     "is_crp": is_crp
                 }
                 
                 print(f"DB 저장 시작 - URL: {url_to_store}")
                 print(f"   is_redirect: {is_redirect}, redirect_url: {redirect_url}")
                 print(f"   is_crp: {is_crp}")
+                print(f"   has_screenshot: {len(screenshot_base64) > 0 if screenshot_base64 else False}")
                 await session.execute(query, values)
                 await session.commit()
                 print(f"DB 저장 완료 - URL: {url_to_store}")
@@ -655,6 +667,92 @@ class PhishingDetectionCacheService:
         except Exception as e:
             logger.error(f"검사 결과 검색 실패: {e}")
             return {"error": str(e)}
+    
+    async def get_screenshot_by_detection_id(self, detection_id: int, user_id: int = None, is_admin: bool = False) -> dict:
+        """탐지 ID로 스크린샷 조회"""
+        try:
+            async with async_session() as session:
+                if is_admin:
+                    # 관리자는 모든 스크린샷 조회 가능
+                    query = text("""
+                    SELECT id, url, screenshot_base64, detected_brand, is_phish, created_at
+                    FROM phishing_detections 
+                    WHERE id = :detection_id AND screenshot_base64 IS NOT NULL AND screenshot_base64 != ''
+                    """)
+                    params = {"detection_id": detection_id}
+                else:
+                    # 일반 사용자는 자신의 탐지 결과만 조회 가능
+                    query = text("""
+                    SELECT id, url, screenshot_base64, detected_brand, is_phish, created_at
+                    FROM phishing_detections 
+                    WHERE id = :detection_id AND (user_id = :user_id OR user_id IS NULL) 
+                    AND screenshot_base64 IS NOT NULL AND screenshot_base64 != ''
+                    """)
+                    params = {"detection_id": detection_id, "user_id": user_id}
+                
+                result = await session.execute(query, params)
+                row = result.fetchone()
+                
+                if row:
+                    return {
+                        "id": row[0],
+                        "url": row[1],
+                        "screenshot_base64": row[2],
+                        "detected_brand": row[3],
+                        "is_phish": row[4],
+                        "created_at": row[5]
+                    }
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"탐지 ID 기반 스크린샷 조회 실패: {e}")
+            return None
+    
+    async def get_screenshot_by_url(self, url: str, user_id: int = None, is_admin: bool = False) -> dict:
+        """URL로 최신 스크린샷 조회"""
+        try:
+            async with async_session() as session:
+                if is_admin:
+                    # 관리자는 모든 스크린샷 조회 가능
+                    query = text("""
+                    SELECT id, url, screenshot_base64, detected_brand, is_phish, created_at
+                    FROM phishing_detections 
+                    WHERE url = :url AND screenshot_base64 IS NOT NULL AND screenshot_base64 != ''
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """)
+                    params = {"url": url}
+                else:
+                    # 일반 사용자는 자신의 탐지 결과만 조회 가능
+                    query = text("""
+                    SELECT id, url, screenshot_base64, detected_brand, is_phish, created_at
+                    FROM phishing_detections 
+                    WHERE url = :url AND (user_id = :user_id OR user_id IS NULL)
+                    AND screenshot_base64 IS NOT NULL AND screenshot_base64 != ''
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """)
+                    params = {"url": url, "user_id": user_id}
+                
+                result = await session.execute(query, params)
+                row = result.fetchone()
+                
+                if row:
+                    return {
+                        "id": row[0],
+                        "url": row[1],
+                        "screenshot_base64": row[2],
+                        "detected_brand": row[3],
+                        "is_phish": row[4],
+                        "created_at": row[5]
+                    }
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"URL 기반 스크린샷 조회 실패: {e}")
+            return None
 
 # 전역 캐시 서비스 인스턴스
 phishing_cache_service = PhishingDetectionCacheService() 

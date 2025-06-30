@@ -352,6 +352,98 @@ async def search_detections(
         logger.error(f"검사 결과 검색 실패: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to search detections: {str(e)}")
 
+@router.get("/screenshot/{detection_id}")
+async def get_screenshot(
+    detection_id: int,
+    current_user: dict = get_optional_user_dep()
+):
+    """
+    특정 탐지 결과의 스크린샷 조회
+    
+    탐지 ID를 기반으로 저장된 스크린샷을 Base64 형태로 반환합니다.
+    관리자는 모든 스크린샷에 접근할 수 있고, 일반 사용자는 자신의 탐지 결과만 접근 가능합니다.
+    """
+    try:
+        # 사용자 권한 확인
+        user_id = current_user.get("id") if current_user else None
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        
+        # 스크린샷 조회
+        screenshot_data = await phishing_cache_service.get_screenshot_by_detection_id(
+            detection_id, user_id, is_admin
+        )
+        
+        if not screenshot_data:
+            raise HTTPException(status_code=404, detail="Screenshot not found or access denied")
+        
+        return {
+            "success": True,
+            "data": {
+                "detection_id": detection_id,
+                "url": screenshot_data.get("url"),
+                "screenshot_base64": screenshot_data.get("screenshot_base64"),
+                "detected_brand": screenshot_data.get("detected_brand"),
+                "is_phish": screenshot_data.get("is_phish"),
+                "created_at": screenshot_data.get("created_at")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"스크린샷 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get screenshot: {str(e)}")
+
+@router.get("/screenshot/url/{encoded_url}")
+async def get_screenshot_by_url(
+    encoded_url: str,
+    current_user: dict = get_optional_user_dep()
+):
+    """
+    URL로 스크린샷 조회
+    
+    URL을 Base64로 인코딩하여 전달하면 해당 URL의 최신 스크린샷을 반환합니다.
+    관리자는 모든 스크린샷에 접근할 수 있고, 일반 사용자는 자신의 탐지 결과만 접근 가능합니다.
+    """
+    try:
+        import base64
+        
+        # URL 디코딩
+        try:
+            url = base64.b64decode(encoded_url).decode('utf-8')
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid encoded URL")
+        
+        # 사용자 권한 확인
+        user_id = current_user.get("id") if current_user else None
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        
+        # 스크린샷 조회
+        screenshot_data = await phishing_cache_service.get_screenshot_by_url(
+            url, user_id, is_admin
+        )
+        
+        if not screenshot_data:
+            raise HTTPException(status_code=404, detail="Screenshot not found or access denied")
+        
+        return {
+            "success": True,
+            "data": {
+                "url": url,
+                "screenshot_base64": screenshot_data.get("screenshot_base64"),
+                "detected_brand": screenshot_data.get("detected_brand"),
+                "is_phish": screenshot_data.get("is_phish"),
+                "created_at": screenshot_data.get("created_at"),
+                "detection_id": screenshot_data.get("id")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"URL 기반 스크린샷 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get screenshot by URL: {str(e)}")
+
 @router.post("/check_phish_simple", 
     response_model=PhishingResponse,
     summary="피싱 사이트 탐지 (URL만)",

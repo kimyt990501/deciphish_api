@@ -7,6 +7,7 @@ from app.services.brand_service import brand_service
 from app.services.brand_database_service import brand_database_service
 from app.services.phishing_detection_cache_service import phishing_cache_service
 from app.services.http_service import http_service
+from app.services.screenshot_service import screenshot_service
 from app.core.whitelist import check_whitelist
 import subprocess
 import sys
@@ -28,6 +29,41 @@ def prepare_final_result(result: dict, original_url: str, final_url: str,
     
     # CRP 정보 추가
     result["crp_detected"] = crp_detected
+    
+    return result
+
+async def capture_and_save_result(url: str, html: str, favicon_b64: str, result: dict, 
+                                user_id: int = None, ip_address: str = None, user_agent: str = None) -> dict:
+    """
+    스크린샷을 캡처하고 결과를 DB에 저장하는 공통 함수
+    """
+    screenshot_base64 = None
+    
+    # 스크린샷 캡처 시도
+    if screenshot_service.is_screenshot_needed(url):
+        print(f"스크린샷 캡처 시도: {url}")
+        try:
+            screenshot_base64 = await screenshot_service.capture_screenshot(url)
+            if screenshot_base64:
+                print(f"스크린샷 캡처 성공: {len(screenshot_base64)} 바이트")
+                # 결과에 스크린샷 정보 추가
+                result["has_screenshot"] = True
+                result["screenshot_size"] = len(screenshot_base64)
+                result["screenshot_base64"] = screenshot_base64
+            else:
+                print(f"스크린샷 캡처 실패: {url}")
+                result["has_screenshot"] = False
+        except Exception as e:
+            print(f"스크린샷 캡처 중 오류: {e}")
+            result["has_screenshot"] = False
+    else:
+        print(f"스크린샷 캡처 제외 URL: {url}")
+        result["has_screenshot"] = False
+    
+    # DB에 저장 (스크린샷 포함)
+    await phishing_cache_service.save_detection_result(
+        url, html, favicon_b64, result, user_id, ip_address, user_agent, screenshot_base64
+    )
     
     return result
 
@@ -362,8 +398,8 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         
         result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
         
-        # 의심스러운 리다이렉트 결과 DB에 저장
-        await phishing_cache_service.save_detection_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+        # 의심스러운 리다이렉트 결과 스크린샷과 함께 저장
+        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
         return result
     
     # 2. 화이트리스트 체크 (정상적인 경우에만)
@@ -382,8 +418,8 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         # 화이트리스트여도 CRP 검사 수행 (기록용)
         result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
         
-        # 화이트리스트 결과도 DB에 저장
-        await phishing_cache_service.save_detection_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+        # 화이트리스트 결과도 스크린샷과 함께 저장
+        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
         return result
 
     # 2. CRP 검사 - 결과만 기록하고 판단에는 사용하지 않음
@@ -430,8 +466,8 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
             # 리다이렉트 정보와 CRP 정보 추가
             result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
             
-            # 결과 캐시에 저장
-            await phishing_cache_service.save_detection_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+            # 결과 스크린샷과 함께 저장
+            result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
             return result
         else:
             print(f"파비콘에서 브랜드 탐지 실패 - 임계값 0.98 미달 또는 오류")
@@ -450,8 +486,8 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         if result:
             # 리다이렉트 정보와 CRP 정보 추가
             result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
-            # 결과 캐시에 저장
-            await phishing_cache_service.save_detection_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+            # 결과 스크린샷과 함께 저장
+            result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
             return result
         
         # DB에 브랜드가 없는 경우 새로운 브랜드로 처리
@@ -459,8 +495,8 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         
         # 리다이렉트 정보와 CRP 정보 추가
         result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
-        # 결과 캐시에 저장
-        await phishing_cache_service.save_detection_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+        # 결과 스크린샷과 함께 저장
+        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
         return result
 
     # 5. 아무것도 탐지되지 않음
@@ -473,6 +509,6 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
     # 리다이렉트 정보와 CRP 정보 추가
     result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
     
-    # 결과 캐시에 저장
-    await phishing_cache_service.save_detection_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+    # 결과 스크린샷과 함께 저장
+    result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
     return result
