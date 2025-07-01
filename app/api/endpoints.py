@@ -30,6 +30,8 @@ class PhishingDetectionResponse(BaseModel):
     detection_id: Optional[int] = Field(None, description="탐지 결과 테이블의 ID")
     detection_time: Optional[str] = Field(None, description="검사 완료 시간 (ISO 형식)")
     screenshot_base64: Optional[str] = Field(None, description="스크린샷 Base64 데이터")
+    is_redirect: Optional[bool] = Field(False, description="리다이렉트 발생 여부")
+    redirect_url: Optional[str] = Field(None, description="리다이렉트된 최종 URL")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="서비스 상태")
@@ -605,6 +607,7 @@ async def redetect_phishing(request: RedetectionRequest, http_request: Request, 
             raise HTTPException(status_code=500, detail="검사 결과 업데이트에 실패했습니다.")
         
         # 5. 응답 데이터 구성
+        redirect_analysis = result.get("redirect_analysis", {})
         response_data = {
             "is_phish": result.get("is_phish", 0),
             "reason": result.get("reason", ""),
@@ -614,7 +617,9 @@ async def redetect_phishing(request: RedetectionRequest, http_request: Request, 
             "from_cache": False,  # 재검사이므로 항상 False
             "detection_id": request.detection_id,
             "detection_time": datetime.now().isoformat(),  # 재검사 완료 시간
-            "screenshot_base64": result.get("screenshot_base64")
+            "screenshot_base64": result.get("screenshot_base64"),
+            "is_redirect": redirect_analysis.get("has_redirect", False),
+            "redirect_url": result.get("final_url") if redirect_analysis.get("has_redirect", False) else None
         }
         
         logger.info(f"재검사 완료: ID {request.detection_id}, 결과 {result.get('reason', '')} (사용자: {user_id})")
@@ -673,7 +678,9 @@ async def get_detection_result(detection_id: int, current_user: dict = get_optio
             "from_cache": True,  # 저장된 결과이므로 캐시로 간주
             "detection_id": detection_id,
             "detection_time": detection_record.get("created_at").isoformat() if detection_record.get("created_at") else None,
-            "screenshot_base64": detection_record.get("screenshot_base64")
+            "screenshot_base64": detection_record.get("screenshot_base64"),
+            "is_redirect": detection_record.get("is_redirect", False),
+            "redirect_url": detection_record.get("redirect_url")
         }
         
         return PhishingDetectionResponse(**response_data)
@@ -723,7 +730,9 @@ async def get_detection_result_post(request: DetectionResultRequest, current_use
             "from_cache": True,  # 저장된 결과이므로 캐시로 간주
             "detection_id": request.detection_id,
             "detection_time": detection_record.get("created_at").isoformat() if detection_record.get("created_at") else None,
-            "screenshot_base64": detection_record.get("screenshot_base64")
+            "screenshot_base64": detection_record.get("screenshot_base64"),
+            "is_redirect": detection_record.get("is_redirect", False),
+            "redirect_url": detection_record.get("redirect_url")
         }
         
         return PhishingDetectionResponse(**response_data)
