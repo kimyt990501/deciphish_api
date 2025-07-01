@@ -69,6 +69,10 @@ async def capture_and_save_result(url: str, html: str, favicon_b64: str, result:
         # 결과에 detection_id 추가
         if detection_id:
             result["detection_id"] = detection_id
+        
+        # 새로운 검사 완료 시간 추가
+        from datetime import datetime
+        result["detection_time"] = datetime.now().isoformat()
     else:
         # 재검사인 경우 스크린샷만 결과에 추가
         if screenshot_base64:

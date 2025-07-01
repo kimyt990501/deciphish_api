@@ -70,16 +70,17 @@ class PhishingDetectionCacheService:
                         "reason": row[3],
                         "detected_brand": row[4],
                         "confidence": row[5],
-                        "cached_at": row[6].isoformat(),
+                        "detection_time": row[6].isoformat(),
                         "from_cache": True
                     }
                     
-                    # 스크린샷이 있으면 포함
+                    # 스크린샷 정보 포함 (항상 포함, 없으면 None)
                     if row[7]:  # screenshot_base64
                         result_dict["screenshot_base64"] = row[7]
                         result_dict["has_screenshot"] = True
                         result_dict["screenshot_size"] = len(row[7])
                     else:
+                        result_dict["screenshot_base64"] = None
                         result_dict["has_screenshot"] = False
                     
                     return result_dict
@@ -274,7 +275,7 @@ class PhishingDetectionCacheService:
             async with async_session() as session:
                 # 기본 쿼리 - 해당 사용자의 기록만
                 base_query = """
-                SELECT url, is_phish, reason, detected_brand, confidence, created_at, updated_at
+                SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, updated_at
                 FROM phishing_detections
                 WHERE user_id = :user_id
                 """
@@ -306,13 +307,14 @@ class PhishingDetectionCacheService:
                 history = []
                 for record in records:
                     history.append({
-                        "url": record[0],
-                        "is_phish": record[1],
-                        "reason": record[2],
-                        "detected_brand": record[3],
-                        "confidence": record[4],
-                        "created_at": record[5].isoformat() if record[5] else None,
-                        "updated_at": record[6].isoformat() if record[6] else None
+                        "detection_id": record[0],
+                        "url": record[1],
+                        "is_phish": record[2],
+                        "reason": record[3],
+                        "detected_brand": record[4],
+                        "confidence": record[5],
+                        "created_at": record[6].isoformat() if record[6] else None,
+                        "updated_at": record[7].isoformat() if record[7] else None
                     })
                 
                 return {

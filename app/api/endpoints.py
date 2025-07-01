@@ -28,6 +28,8 @@ class PhishingDetectionResponse(BaseModel):
     url: str = Field(..., description="분석된 URL")
     from_cache: Optional[bool] = Field(False, description="캐시에서 조회된 결과인지 여부")
     detection_id: Optional[int] = Field(None, description="탐지 결과 테이블의 ID")
+    detection_time: Optional[str] = Field(None, description="검사 완료 시간 (ISO 형식)")
+    screenshot_base64: Optional[str] = Field(None, description="스크린샷 Base64 데이터")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="서비스 상태")
@@ -49,6 +51,9 @@ class PhishingResponse(BaseModel):
 
 class RedetectionRequest(BaseModel):
     detection_id: int = Field(..., description="재검사할 탐지 결과 ID")
+
+class DetectionResultRequest(BaseModel):
+    detection_id: int = Field(..., description="조회할 탐지 결과 ID")
 
 @router.get("/health", 
     response_model=HealthResponse,
@@ -116,6 +121,7 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
             )
         
         # 응답 형식 맞추기
+        from datetime import datetime
         response_data = {
             "is_phish": result.get("is_phish", 0),
             "reason": result.get("reason", ""),
@@ -123,7 +129,9 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
             "confidence": result.get("similarity") or result.get("confidence"),
             "url": url,
             "from_cache": result.get("from_cache", False),
-            "detection_id": result.get("detection_id")
+            "detection_id": result.get("detection_id"),
+            "detection_time": result.get("detection_time", datetime.now().isoformat()),
+            "screenshot_base64": result.get("screenshot_base64")
         }
         
         return PhishingDetectionResponse(**response_data)
@@ -170,6 +178,10 @@ async def detect_phishing(request: URLRequest, http_request: Request, current_us
             ip_address=ip_address,
             user_agent=user_agent
         )
+        
+        # detection_time 추가 (캐시에서 온 경우가 아니면 현재 시간)
+        if not result.get("detection_time"):
+            result["detection_time"] = datetime.now().isoformat()
         
         return result
         
@@ -513,6 +525,10 @@ async def check_phish_simple(payload: SimplePhishingRequest, http_request: Reque
             user_agent=user_agent
         )
         
+        # detection_time 추가 (캐시에서 온 경우가 아니면 현재 시간)
+        if not result.get("detection_time"):
+            result["detection_time"] = datetime.now().isoformat()
+        
         logger.info(f"Simple detection completed for URL: {url}")
         return {"result": result}
         
@@ -596,7 +612,9 @@ async def redetect_phishing(request: RedetectionRequest, http_request: Request, 
             "confidence": result.get("similarity") or result.get("confidence"),
             "url": url,
             "from_cache": False,  # 재검사이므로 항상 False
-            "detection_id": request.detection_id
+            "detection_id": request.detection_id,
+            "detection_time": datetime.now().isoformat(),  # 재검사 완료 시간
+            "screenshot_base64": result.get("screenshot_base64")
         }
         
         logger.info(f"재검사 완료: ID {request.detection_id}, 결과 {result.get('reason', '')} (사용자: {user_id})")
@@ -607,6 +625,114 @@ async def redetect_phishing(request: RedetectionRequest, http_request: Request, 
     except Exception as e:
         logger.error(f"재검사 실패: {e}")
         raise HTTPException(status_code=500, detail=f"재검사 중 오류가 발생했습니다: {str(e)}")
+
+@router.get("/detection/{detection_id}", 
+    response_model=PhishingDetectionResponse,
+    summary="검사 결과 조회",
+    description="detection_id를 기반으로 저장된 검사 결과를 조회합니다.")
+async def get_detection_result(detection_id: int, current_user: dict = get_optional_user_dep()):
+    """
+    검사 결과 조회 API
+    
+    detection_id를 받아서 저장된 검사 결과를 조회합니다.
+    권한: 관리자는 모든 레코드, 일반 사용자는 자신의 레코드만 조회 가능
+    """
+    try:
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        
+        # 검사 결과 조회 (권한 확인 포함)
+        detection_record = await phishing_cache_service.get_detection_by_id(
+            detection_id, user_id, is_admin
+        )
+        
+        if not detection_record:
+            if user_id is None:
+                logger.warning(f"인증되지 않은 사용자가 검사 결과 조회 시도: ID {detection_id}")
+                raise HTTPException(
+                    status_code=401, 
+                    detail="로그인이 필요합니다. 토큰이 만료되었거나 유효하지 않습니다."
+                )
+            else:
+                logger.warning(f"권한 없는 접근 시도: 사용자 {user_id}가 검사 결과 {detection_id} 조회")
+                raise HTTPException(
+                    status_code=404, 
+                    detail="검사 결과를 찾을 수 없거나 접근 권한이 없습니다."
+                )
+        
+        logger.info(f"검사 결과 조회: ID {detection_id}, URL {detection_record['url']} (사용자: {user_id})")
+        
+        # 응답 데이터 구성
+        response_data = {
+            "is_phish": detection_record.get("is_phish", 0),
+            "reason": detection_record.get("reason", ""),
+            "detected_brand": detection_record.get("detected_brand"),
+            "confidence": detection_record.get("confidence"),
+            "url": detection_record.get("url"),
+            "from_cache": True,  # 저장된 결과이므로 캐시로 간주
+            "detection_id": detection_id,
+            "detection_time": detection_record.get("created_at").isoformat() if detection_record.get("created_at") else None,
+            "screenshot_base64": detection_record.get("screenshot_base64")
+        }
+        
+        return PhishingDetectionResponse(**response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"검사 결과 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"검사 결과 조회 중 오류가 발생했습니다: {str(e)}")
+
+@router.post("/detection/get", 
+    response_model=PhishingDetectionResponse,
+    summary="검사 결과 조회 (POST)",
+    description="detection_id를 POST 방식으로 받아서 저장된 검사 결과를 조회합니다.")
+async def get_detection_result_post(request: DetectionResultRequest, current_user: dict = get_optional_user_dep()):
+    """
+    검사 결과 조회 API (POST 방식)
+    
+    detection_id를 POST 방식으로 받아서 저장된 검사 결과를 조회합니다.
+    권한: 관리자는 모든 레코드, 일반 사용자는 자신의 레코드만 조회 가능
+    """
+    try:
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        
+        # 검사 결과 조회 (권한 확인 포함)
+        detection_record = await phishing_cache_service.get_detection_by_id(
+            request.detection_id, user_id, is_admin
+        )
+        
+        if not detection_record:
+            raise HTTPException(
+                status_code=404, 
+                detail="검사 결과를 찾을 수 없거나 접근 권한이 없습니다."
+            )
+        
+        logger.info(f"검사 결과 조회 (POST): ID {request.detection_id}, URL {detection_record['url']} (사용자: {user_id})")
+        
+        # 응답 데이터 구성
+        response_data = {
+            "is_phish": detection_record.get("is_phish", 0),
+            "reason": detection_record.get("reason", ""),
+            "detected_brand": detection_record.get("detected_brand"),
+            "confidence": detection_record.get("confidence"),
+            "url": detection_record.get("url"),
+            "from_cache": True,  # 저장된 결과이므로 캐시로 간주
+            "detection_id": request.detection_id,
+            "detection_time": detection_record.get("created_at").isoformat() if detection_record.get("created_at") else None,
+            "screenshot_base64": detection_record.get("screenshot_base64")
+        }
+        
+        return PhishingDetectionResponse(**response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"검사 결과 조회 실패 (POST): {e}")
+        raise HTTPException(status_code=500, detail=f"검사 결과 조회 중 오류가 발생했습니다: {str(e)}")
 
 # 사용자 인증 관련 엔드포인트들
 @router.post("/auth/register", 
