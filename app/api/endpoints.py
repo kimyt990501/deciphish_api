@@ -27,6 +27,7 @@ class PhishingDetectionResponse(BaseModel):
     confidence: Optional[float] = Field(None, description="신뢰도")
     url: str = Field(..., description="분석된 URL")
     from_cache: Optional[bool] = Field(False, description="캐시에서 조회된 결과인지 여부")
+    detection_id: Optional[int] = Field(None, description="탐지 결과 테이블의 ID")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="서비스 상태")
@@ -77,9 +78,9 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
         user_agent = http_request.headers.get("user-agent", "")
         
         # 캐시 확인 먼저 수행
-        cached_result = await phishing_cache_service.get_cached_result(url)
+        cached_result = await phishing_cache_service.get_cached_result(url, user_id)
         if cached_result:
-            logger.info(f"캐시된 결과 반환: {url}")
+            logger.info(f"캐시된 결과 반환: {url} (사용자: {user_id})")
             return PhishingDetectionResponse(**cached_result)
         
         if request.use_manual_content and request.html_content:
@@ -118,7 +119,8 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
             "detected_brand": result.get("detected_brand"),
             "confidence": result.get("similarity") or result.get("confidence"),
             "url": url,
-            "from_cache": result.get("from_cache", False)
+            "from_cache": result.get("from_cache", False),
+            "detection_id": result.get("detection_id")
         }
         
         return PhishingDetectionResponse(**response_data)
@@ -134,19 +136,19 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
 async def detect_phishing(request: URLRequest, http_request: Request, current_user: dict = get_optional_user_dep()):
     """URL을 기반으로 피싱 사이트 탐지 (호환성을 위한 엔드포인트)"""
     try:
-        # 1. 캐시 확인 먼저
-        logger.info(f"캐시 확인 중: {request.url}")
-        cached_result = await phishing_cache_service.get_cached_result(request.url)
-        if cached_result:
-            logger.info(f"캐시된 결과 반환: {request.url} - {cached_result['reason']}")
-            return cached_result
-        
-        logger.info(f"캐시 미스 - 웹 콘텐츠 수집 시작: {request.url}")
-        
-        # 사용자 정보 추출
+        # 사용자 정보 추출 먼저
         user_id = current_user.get("id") if current_user else None
         ip_address = http_request.client.host
         user_agent = http_request.headers.get("user-agent", "")
+        
+        # 1. 캐시 확인 먼저
+        logger.info(f"캐시 확인 중: {request.url} (사용자: {user_id})")
+        cached_result = await phishing_cache_service.get_cached_result(request.url, user_id)
+        if cached_result:
+            logger.info(f"캐시된 결과 반환: {request.url} - {cached_result['reason']} (사용자: {user_id})")
+            return cached_result
+        
+        logger.info(f"캐시 미스 - 웹 콘텐츠 수집 시작: {request.url}")
         
         # 2. 웹 콘텐츠 수집
         collector = get_web_collector()
@@ -465,16 +467,21 @@ async def get_screenshot_by_url(
     * detected_brand: 탐지된 브랜드
     * from_cache: 캐시에서 조회된 결과인지 여부 (선택사항)
     """)
-async def check_phish_simple(payload: SimplePhishingRequest):
+async def check_phish_simple(payload: SimplePhishingRequest, http_request: Request, current_user: dict = get_optional_user_dep()):
     try:
         url = str(payload.url)
         logger.info(f"Received simple phishing detection request for URL: {url}")
         
-        # 1. 캐시 확인 먼저
-        logger.info(f"캐시 확인 중: {url}")
-        cached_result = await phishing_cache_service.get_cached_result(url)
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        ip_address = http_request.client.host
+        user_agent = http_request.headers.get("user-agent", "")
+        
+        # 1. 캐시 확인 먼저 (사용자별로)
+        logger.info(f"캐시 확인 중: {url} (사용자: {user_id})")
+        cached_result = await phishing_cache_service.get_cached_result(url, user_id)
         if cached_result:
-            logger.info(f"캐시된 결과 반환: {url} - {cached_result['reason']}")
+            logger.info(f"캐시된 결과 반환: {url} - {cached_result['reason']} (사용자: {user_id})")
             return {"result": cached_result}
         
         logger.info(f"캐시 미스 - 웹 콘텐츠 수집 시작: {url}")
@@ -498,9 +505,9 @@ async def check_phish_simple(payload: SimplePhishingRequest):
             html=html_content,
             favicon_b64=favicon_base64 or "",
             brand_list=[],
-            user_id=None,
-            ip_address=None,
-            user_agent=None
+            user_id=user_id,
+            ip_address=ip_address,
+            user_agent=user_agent
         )
         
         logger.info(f"Simple detection completed for URL: {url}")

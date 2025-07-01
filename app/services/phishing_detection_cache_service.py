@@ -22,12 +22,13 @@ class PhishingDetectionCacheService:
         """URL을 해시화하여 키로 사용"""
         return hashlib.md5(url.encode('utf-8')).hexdigest()
     
-    async def get_cached_result(self, url: str) -> dict:
+    async def get_cached_result(self, url: str, user_id: int = None) -> dict:
         """
         캐시된 피싱 검사 결과 조회
         
         Args:
             url: 검사할 URL
+            user_id: 사용자 ID (None이면 user_id가 NULL인 결과 조회)
             
         Returns:
             캐시된 결과 또는 None
@@ -37,34 +38,47 @@ class PhishingDetectionCacheService:
                 # TTL 체크 포함하여 조회
                 cutoff_time = datetime.now() - timedelta(hours=self.cache_ttl_hours)
                 
-                query = text("""
-                SELECT url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64
-                FROM phishing_detections 
-                WHERE url = :url AND created_at > :cutoff_time
-                ORDER BY created_at DESC 
-                LIMIT 1
-                """)
+                # user_id 조건 추가
+                if user_id is None:
+                    query = text("""
+                    SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64
+                    FROM phishing_detections 
+                    WHERE url = :url AND user_id IS NULL AND created_at > :cutoff_time
+                    ORDER BY created_at DESC 
+                    LIMIT 1
+                    """)
+                    query_params = {"url": url, "cutoff_time": cutoff_time}
+                else:
+                    query = text("""
+                    SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64
+                    FROM phishing_detections 
+                    WHERE url = :url AND user_id = :user_id AND created_at > :cutoff_time
+                    ORDER BY created_at DESC 
+                    LIMIT 1
+                    """)
+                    query_params = {"url": url, "user_id": user_id, "cutoff_time": cutoff_time}
                 
-                result = await session.execute(query, {"url": url, "cutoff_time": cutoff_time})
+                result = await session.execute(query, query_params)
                 row = result.fetchone()
                 
                 if row:
                     logger.info(f"캐시된 결과 조회 성공: {url}")
                     result_dict = {
-                        "url": row[0],
-                        "is_phish": row[1],
-                        "reason": row[2],
-                        "detected_brand": row[3],
-                        "confidence": row[4],
-                        "cached_at": row[5].isoformat(),
+                        "detection_id": row[0],
+                        "url": row[1],
+                        "is_phish": row[2],
+                        "reason": row[3],
+                        "detected_brand": row[4],
+                        "confidence": row[5],
+                        "cached_at": row[6].isoformat(),
                         "from_cache": True
                     }
                     
                     # 스크린샷이 있으면 포함
-                    if row[6]:  # screenshot_base64
-                        result_dict["screenshot_base64"] = row[6]
+                    if row[7]:  # screenshot_base64
+                        result_dict["screenshot_base64"] = row[7]
                         result_dict["has_screenshot"] = True
-                        result_dict["screenshot_size"] = len(row[6])
+                        result_dict["screenshot_size"] = len(row[7])
                     else:
                         result_dict["has_screenshot"] = False
                     
@@ -78,7 +92,7 @@ class PhishingDetectionCacheService:
             return None
     
     async def save_detection_result(self, url: str, html_content: str, favicon_base64: str, 
-                                  detection_result: dict, user_id: int = None, ip_address: str = None, user_agent: str = None, screenshot_base64: str = None) -> bool:
+                                  detection_result: dict, user_id: int = None, ip_address: str = None, user_agent: str = None, screenshot_base64: str = None) -> int:
         """
         피싱 검사 결과를 데이터베이스에 저장
         
@@ -92,7 +106,7 @@ class PhishingDetectionCacheService:
             user_agent: User Agent (선택적)
             
         Returns:
-            저장 성공 여부
+            저장된 레코드의 ID (저장 실패 시 None)
         """
         try:
             async with async_session() as session:
@@ -156,9 +170,12 @@ class PhishingDetectionCacheService:
                 print(f"   is_redirect: {is_redirect}, redirect_url: {redirect_url}")
                 print(f"   is_crp: {is_crp}")
                 print(f"   has_screenshot: {len(screenshot_base64) > 0 if screenshot_base64 else False}")
-                await session.execute(query, values)
+                result = await session.execute(query, values)
                 await session.commit()
-                print(f"DB 저장 완료 - URL: {url_to_store}")
+                
+                # 삽입된 레코드의 ID 가져오기
+                detection_id = result.lastrowid
+                print(f"DB 저장 완료 - URL: {url_to_store}, ID: {detection_id}")
                 
                 if redirect_analysis.get("has_redirect", False):
                     redirect_msg = f" (원본 URL 저장: {original_url} -> {final_url})"
@@ -166,15 +183,15 @@ class PhishingDetectionCacheService:
                     redirect_msg = ""
                 
                 crp_msg = f" CRP: {'검출' if is_crp else '미검출'}"
-                logger.info(f"검사 결과 저장 성공: {url_to_store} - {detection_result.get('reason', '')} (사용자: {user_id}){redirect_msg}{crp_msg}")
-                return True
+                logger.info(f"검사 결과 저장 성공: ID {detection_id}, {url_to_store} - {detection_result.get('reason', '')} (사용자: {user_id}){redirect_msg}{crp_msg}")
+                return detection_id
                     
         except Exception as e:
             print(f"DB 저장 실패 - URL: {url}")
             print(f"   오류: {str(e)}")
             print(f"   detection_result: {detection_result}")
             logger.error(f"검사 결과 저장 실패: {e}")
-            return False
+            return None
     
     async def get_cache_stats(self) -> dict:
         """캐시 통계 정보 조회"""

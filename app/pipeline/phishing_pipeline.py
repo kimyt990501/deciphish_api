@@ -61,9 +61,13 @@ async def capture_and_save_result(url: str, html: str, favicon_b64: str, result:
         result["has_screenshot"] = False
     
     # DB에 저장 (스크린샷 포함)
-    await phishing_cache_service.save_detection_result(
+    detection_id = await phishing_cache_service.save_detection_result(
         url, html, favicon_b64, result, user_id, ip_address, user_agent, screenshot_base64
     )
+    
+    # 결과에 detection_id 추가
+    if detection_id:
+        result["detection_id"] = detection_id
     
     return result
 
