@@ -33,7 +33,7 @@ def prepare_final_result(result: dict, original_url: str, final_url: str,
     return result
 
 async def capture_and_save_result(url: str, html: str, favicon_b64: str, result: dict, 
-                                user_id: int = None, ip_address: str = None, user_agent: str = None) -> dict:
+                                user_id: int = None, ip_address: str = None, user_agent: str = None, save_to_db: bool = True) -> dict:
     """
     스크린샷을 캡처하고 결과를 DB에 저장하는 공통 함수
     """
@@ -61,13 +61,18 @@ async def capture_and_save_result(url: str, html: str, favicon_b64: str, result:
         result["has_screenshot"] = False
     
     # DB에 저장 (스크린샷 포함)
-    detection_id = await phishing_cache_service.save_detection_result(
-        url, html, favicon_b64, result, user_id, ip_address, user_agent, screenshot_base64
-    )
-    
-    # 결과에 detection_id 추가
-    if detection_id:
-        result["detection_id"] = detection_id
+    if save_to_db:
+        detection_id = await phishing_cache_service.save_detection_result(
+            url, html, favicon_b64, result, user_id, ip_address, user_agent, screenshot_base64
+        )
+        
+        # 결과에 detection_id 추가
+        if detection_id:
+            result["detection_id"] = detection_id
+    else:
+        # 재검사인 경우 스크린샷만 결과에 추가
+        if screenshot_base64:
+            result["screenshot_base64"] = screenshot_base64
     
     return result
 
@@ -324,7 +329,7 @@ async def handle_new_brand_detection(url: str, detected_brand: str, detected_dom
             result["similarity"] = similarity
         return result
 
-async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=None, ip_address=None, user_agent=None):
+async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=None, ip_address=None, user_agent=None, save_to_db=True):
     # 0-1. 리다이렉트 확인하여 최종 URL 얻기
     print(f"피싱 검사 시작 - 원본 URL: {url}")
     final_url, redirect_analysis = await get_final_url(url)
@@ -403,7 +408,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
         
         # 의심스러운 리다이렉트 결과 스크린샷과 함께 저장
-        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent, save_to_db)
         return result
     
     # 2. 화이트리스트 체크 (정상적인 경우에만)
@@ -423,7 +428,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
         
         # 화이트리스트 결과도 스크린샷과 함께 저장
-        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent, save_to_db)
         return result
 
     # 2. CRP 검사 - 결과만 기록하고 판단에는 사용하지 않음
@@ -471,7 +476,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
             result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
             
             # 결과 스크린샷과 함께 저장
-            result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+            result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent, save_to_db)
             return result
         else:
             print(f"파비콘에서 브랜드 탐지 실패 - 임계값 0.98 미달 또는 오류")
@@ -491,7 +496,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
             # 리다이렉트 정보와 CRP 정보 추가
             result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
             # 결과 스크린샷과 함께 저장
-            result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+            result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent, save_to_db)
             return result
         
         # DB에 브랜드가 없는 경우 새로운 브랜드로 처리
@@ -500,7 +505,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         # 리다이렉트 정보와 CRP 정보 추가
         result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
         # 결과 스크린샷과 함께 저장
-        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+        result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent, save_to_db)
         return result
 
     # 5. 아무것도 탐지되지 않음
@@ -514,5 +519,5 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
     result = prepare_final_result(result, original_url, url, redirect_analysis, crp_detected)
     
     # 결과 스크린샷과 함께 저장
-    result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent)
+    result = await capture_and_save_result(url, html, favicon_b64, result, user_id, ip_address, user_agent, save_to_db)
     return result

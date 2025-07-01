@@ -726,6 +726,170 @@ class PhishingDetectionCacheService:
             logger.error(f"탐지 ID 기반 스크린샷 조회 실패: {e}")
             return None
     
+    async def get_detection_by_id(self, detection_id: int, user_id: int = None, is_admin: bool = False) -> dict:
+        """
+        detection_id로 검사 결과 조회
+        
+        Args:
+            detection_id: 검사 결과 ID
+            user_id: 요청한 사용자 ID (권한 확인용)
+            is_admin: 관리자 여부
+            
+        Returns:
+            검사 결과 정보 또는 None
+        """
+        try:
+            async with async_session() as session:
+                # 권한 확인 포함한 조회
+                if is_admin:
+                    # 관리자는 모든 레코드 조회 가능
+                    query = text("""
+                    SELECT id, user_id, url, is_phish, reason, detected_brand, confidence, 
+                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at
+                    FROM phishing_detections 
+                    WHERE id = :detection_id
+                    """)
+                    params = {"detection_id": detection_id}
+                elif user_id is not None:
+                    # 로그인 사용자는 자신의 레코드만 조회 가능
+                    query = text("""
+                    SELECT id, user_id, url, is_phish, reason, detected_brand, confidence, 
+                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at
+                    FROM phishing_detections 
+                    WHERE id = :detection_id AND user_id = :user_id
+                    """)
+                    params = {"detection_id": detection_id, "user_id": user_id}
+                else:
+                    # 비로그인 사용자는 user_id가 NULL인 레코드만 조회 가능
+                    query = text("""
+                    SELECT id, user_id, url, is_phish, reason, detected_brand, confidence, 
+                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at
+                    FROM phishing_detections 
+                    WHERE id = :detection_id AND user_id IS NULL
+                    """)
+                    params = {"detection_id": detection_id}
+                
+                result = await session.execute(query, params)
+                row = result.fetchone()
+                
+                if row:
+                    return {
+                        "id": row[0],
+                        "user_id": row[1],
+                        "url": row[2],
+                        "is_phish": row[3],
+                        "reason": row[4],
+                        "detected_brand": row[5],
+                        "confidence": row[6],
+                        "html_content": row[7],
+                        "favicon_base64": row[8],
+                        "screenshot_base64": row[9],
+                        "ip_address": row[10],
+                        "user_agent": row[11],
+                        "created_at": row[12]
+                    }
+                else:
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"detection_id로 검사 결과 조회 실패 ({detection_id}): {e}")
+            return None
+    
+    async def update_detection_result(self, detection_id: int, detection_result: dict, 
+                                    html_content: str = None, favicon_base64: str = None, 
+                                    screenshot_base64: str = None) -> bool:
+        """
+        기존 검사 결과 업데이트
+        
+        Args:
+            detection_id: 업데이트할 검사 결과 ID
+            detection_result: 새로운 검사 결과
+            html_content: 새로운 HTML 내용 (선택적)
+            favicon_base64: 새로운 파비콘 (선택적)
+            screenshot_base64: 새로운 스크린샷 (선택적)
+            
+        Returns:
+            업데이트 성공 여부
+        """
+        try:
+            async with async_session() as session:
+                # 리다이렉트 정보 추출
+                redirect_analysis = detection_result.get("redirect_analysis", {})
+                
+                # 리다이렉트 정보를 reason에 포함
+                reason = detection_result.get("reason", "")
+                if redirect_analysis.get("has_redirect", False):
+                    original_url = detection_result.get("original_url")
+                    final_url = detection_result.get("final_url")
+                    if original_url and final_url and original_url != final_url:
+                        short_final_url = final_url[:50] + "..." if len(final_url) > 50 else final_url
+                        redirect_text = f" (redirected to {short_final_url})"
+                        max_reason_length = 200 - len(redirect_text)
+                        if len(reason) > max_reason_length:
+                            reason = reason[:max_reason_length]
+                        reason += redirect_text
+                
+                # 업데이트할 필드들
+                update_fields = []
+                update_params = {"detection_id": detection_id}
+                
+                # 필수 업데이트 필드들
+                update_fields.append("is_phish = :is_phish")
+                update_params["is_phish"] = detection_result.get("is_phish", 0)
+                
+                update_fields.append("reason = :reason")
+                update_params["reason"] = reason[:250] if reason else ""
+                
+                update_fields.append("detected_brand = :detected_brand")
+                update_params["detected_brand"] = detection_result.get("detected_brand", "")[:100] if detection_result.get("detected_brand") else ""
+                
+                update_fields.append("confidence = :confidence")
+                update_params["confidence"] = detection_result.get("similarity", detection_result.get("confidence", 0.0))
+                
+                update_fields.append("is_redirect = :is_redirect")
+                update_params["is_redirect"] = 1 if redirect_analysis.get("has_redirect", False) else 0
+                
+                update_fields.append("redirect_url = :redirect_url")
+                update_params["redirect_url"] = detection_result.get("final_url") if redirect_analysis.get("has_redirect", False) else None
+                
+                update_fields.append("is_crp = :is_crp")
+                update_params["is_crp"] = 1 if detection_result.get("crp_detected", False) else 0
+                
+                update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                
+                # 선택적 필드들
+                if html_content is not None:
+                    update_fields.append("html_content = :html_content")
+                    update_params["html_content"] = html_content[:65535] if html_content else ""
+                
+                if favicon_base64 is not None:
+                    update_fields.append("favicon_base64 = :favicon_base64")
+                    update_params["favicon_base64"] = favicon_base64[:65535] if favicon_base64 else ""
+                
+                if screenshot_base64 is not None:
+                    update_fields.append("screenshot_base64 = :screenshot_base64")
+                    update_params["screenshot_base64"] = screenshot_base64 if screenshot_base64 else ""
+                
+                query = text(f"""
+                UPDATE phishing_detections 
+                SET {', '.join(update_fields)}
+                WHERE id = :detection_id
+                """)
+                
+                result = await session.execute(query, update_params)
+                await session.commit()
+                
+                if result.rowcount > 0:
+                    logger.info(f"검사 결과 업데이트 성공: ID {detection_id}")
+                    return True
+                else:
+                    logger.warning(f"업데이트할 검사 결과를 찾을 수 없음: ID {detection_id}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"검사 결과 업데이트 실패 (ID {detection_id}): {e}")
+            return False
+
     async def get_screenshot_by_url(self, url: str, user_id: int = None, is_admin: bool = False) -> dict:
         """URL로 최신 스크린샷 조회"""
         try:

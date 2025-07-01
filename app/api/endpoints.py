@@ -47,6 +47,9 @@ class SimplePhishingRequest(BaseModel):
 class PhishingResponse(BaseModel):
     result: dict = Field(..., description="피싱 탐지 결과")
 
+class RedetectionRequest(BaseModel):
+    detection_id: int = Field(..., description="재검사할 탐지 결과 ID")
+
 @router.get("/health", 
     response_model=HealthResponse,
     summary="서비스 상태 확인",
@@ -521,6 +524,89 @@ async def check_phish_simple(payload: SimplePhishingRequest, http_request: Reque
             "detected_brand": None,
             "error": str(e)
         }}
+
+@router.post("/redetect", 
+    response_model=PhishingDetectionResponse,
+    summary="피싱 사이트 재검사",
+    description="detection_id를 기반으로 해당 URL을 재검사하고 결과를 업데이트합니다.")
+async def redetect_phishing(request: RedetectionRequest, http_request: Request, current_user: dict = get_optional_user_dep()):
+    """
+    피싱 사이트 재검사 API
+    
+    detection_id를 받아서 해당 URL을 다시 검사하고 결과를 업데이트합니다.
+    권한: 관리자는 모든 레코드, 일반 사용자는 자신의 레코드만 재검사 가능
+    """
+    try:
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        is_admin = current_user.get("role") == "admin" if current_user else False
+        ip_address = http_request.client.host
+        user_agent = http_request.headers.get("user-agent", "")
+        
+        # 1. 기존 검사 결과 조회 (권한 확인 포함)
+        detection_record = await phishing_cache_service.get_detection_by_id(
+            request.detection_id, user_id, is_admin
+        )
+        
+        if not detection_record:
+            raise HTTPException(
+                status_code=404, 
+                detail="검사 결과를 찾을 수 없거나 접근 권한이 없습니다."
+            )
+        
+        url = detection_record["url"]
+        logger.info(f"재검사 시작: ID {request.detection_id}, URL {url} (사용자: {user_id})")
+        
+        # 2. 웹 콘텐츠 수집
+        collector = get_web_collector()
+        html_content, favicon_base64 = collector.collect_web_content(url)
+        
+        if not html_content:
+            raise HTTPException(status_code=400, detail="웹 콘텐츠 수집에 실패했습니다.")
+        
+        # 3. 피싱 탐지 실행 (캐시 저장 없이)
+        result = await phishing_detector_base64(
+            url=url,
+            html=html_content,
+            favicon_b64=favicon_base64 or "",
+            brand_list=[],
+            user_id=None,  # 재검사이므로 새 레코드 생성하지 않음
+            ip_address=None,
+            user_agent=None,
+            save_to_db=False  # 재검사이므로 새 레코드 생성하지 않음
+        )
+        
+        # 4. 기존 레코드 업데이트
+        update_success = await phishing_cache_service.update_detection_result(
+            detection_id=request.detection_id,
+            detection_result=result,
+            html_content=html_content,
+            favicon_base64=favicon_base64,
+            screenshot_base64=result.get("screenshot_base64")
+        )
+        
+        if not update_success:
+            raise HTTPException(status_code=500, detail="검사 결과 업데이트에 실패했습니다.")
+        
+        # 5. 응답 데이터 구성
+        response_data = {
+            "is_phish": result.get("is_phish", 0),
+            "reason": result.get("reason", ""),
+            "detected_brand": result.get("detected_brand"),
+            "confidence": result.get("similarity") or result.get("confidence"),
+            "url": url,
+            "from_cache": False,  # 재검사이므로 항상 False
+            "detection_id": request.detection_id
+        }
+        
+        logger.info(f"재검사 완료: ID {request.detection_id}, 결과 {result.get('reason', '')} (사용자: {user_id})")
+        return PhishingDetectionResponse(**response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"재검사 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"재검사 중 오류가 발생했습니다: {str(e)}")
 
 # 사용자 인증 관련 엔드포인트들
 @router.post("/auth/register", 
