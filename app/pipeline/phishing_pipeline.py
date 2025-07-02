@@ -27,8 +27,9 @@ def prepare_final_result(result: dict, original_url: str, final_url: str,
         result["final_url"] = final_url
     result["redirect_analysis"] = redirect_analysis
     
-    # CRP 정보 추가
+    # CRP 정보 추가 (호환성을 위해 두 필드 모두 추가)
     result["crp_detected"] = crp_detected
+    result["is_crp"] = crp_detected
     
     return result
 

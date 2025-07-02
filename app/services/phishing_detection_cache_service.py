@@ -41,7 +41,7 @@ class PhishingDetectionCacheService:
                 # user_id 조건 추가
                 if user_id is None:
                     query = text("""
-                    SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64
+                    SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64, is_crp
                     FROM phishing_detections 
                     WHERE url = :url AND user_id IS NULL AND created_at > :cutoff_time
                     ORDER BY created_at DESC 
@@ -50,7 +50,7 @@ class PhishingDetectionCacheService:
                     query_params = {"url": url, "cutoff_time": cutoff_time}
                 else:
                     query = text("""
-                    SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64
+                    SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, screenshot_base64, is_crp
                     FROM phishing_detections 
                     WHERE url = :url AND user_id = :user_id AND created_at > :cutoff_time
                     ORDER BY created_at DESC 
@@ -71,7 +71,8 @@ class PhishingDetectionCacheService:
                         "detected_brand": row[4],
                         "confidence": row[5],
                         "detection_time": row[6].isoformat(),
-                        "from_cache": True
+                        "from_cache": True,
+                        "is_crp": bool(row[8]) if row[8] is not None else False
                     }
                     
                     # 스크린샷 정보 포함 (항상 포함, 없으면 None)
@@ -275,7 +276,7 @@ class PhishingDetectionCacheService:
             async with async_session() as session:
                 # 기본 쿼리 - 해당 사용자의 기록만
                 base_query = """
-                SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, updated_at, is_redirect, redirect_url
+                SELECT id, url, is_phish, reason, detected_brand, confidence, created_at, updated_at, is_redirect, redirect_url, is_crp
                 FROM phishing_detections
                 WHERE user_id = :user_id
                 """
@@ -316,7 +317,8 @@ class PhishingDetectionCacheService:
                         "created_at": record[6].isoformat() if record[6] else None,
                         "updated_at": record[7].isoformat() if record[7] else None,
                         "is_redirect": bool(record[8]) if record[8] is not None else False,
-                        "redirect_url": record[9] if record[9] else None
+                        "redirect_url": record[9] if record[9] else None,
+                        "is_crp": bool(record[10]) if record[10] is not None else False
                     })
                 
                 return {
@@ -427,7 +429,7 @@ class PhishingDetectionCacheService:
             async with async_session() as session:
                 # 기본 쿼리
                 base_query = """
-                SELECT url, is_phish, reason, detected_brand, confidence, created_at, updated_at
+                SELECT url, is_phish, reason, detected_brand, confidence, created_at, updated_at, is_crp
                 FROM phishing_detections
                 """
                 count_query = "SELECT COUNT(*) FROM phishing_detections"
@@ -464,7 +466,8 @@ class PhishingDetectionCacheService:
                         "detected_brand": record[3],
                         "confidence": record[4],
                         "created_at": record[5].isoformat() if record[5] else None,
-                        "updated_at": record[6].isoformat() if record[6] else None
+                        "updated_at": record[6].isoformat() if record[6] else None,
+                        "is_crp": bool(record[7]) if record[7] is not None else False
                     })
                 
                 return {
@@ -749,7 +752,7 @@ class PhishingDetectionCacheService:
                     # 관리자는 모든 레코드 조회 가능
                     query = text("""
                     SELECT id, user_id, url, is_phish, reason, detected_brand, confidence, 
-                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at, is_redirect, redirect_url
+                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at, is_redirect, redirect_url, is_crp
                     FROM phishing_detections 
                     WHERE id = :detection_id
                     """)
@@ -758,7 +761,7 @@ class PhishingDetectionCacheService:
                     # 로그인 사용자는 자신의 레코드만 조회 가능
                     query = text("""
                     SELECT id, user_id, url, is_phish, reason, detected_brand, confidence, 
-                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at, is_redirect, redirect_url
+                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at, is_redirect, redirect_url, is_crp
                     FROM phishing_detections 
                     WHERE id = :detection_id AND user_id = :user_id
                     """)
@@ -767,7 +770,7 @@ class PhishingDetectionCacheService:
                     # 비로그인 사용자는 user_id가 NULL인 레코드만 조회 가능
                     query = text("""
                     SELECT id, user_id, url, is_phish, reason, detected_brand, confidence, 
-                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at, is_redirect, redirect_url
+                           html_content, favicon_base64, screenshot_base64, ip_address, user_agent, created_at, is_redirect, redirect_url, is_crp
                     FROM phishing_detections 
                     WHERE id = :detection_id AND user_id IS NULL
                     """)
@@ -792,7 +795,8 @@ class PhishingDetectionCacheService:
                         "user_agent": row[11],
                         "created_at": row[12],
                         "is_redirect": bool(row[13]) if row[13] is not None else False,
-                        "redirect_url": row[14] if row[14] else None
+                        "redirect_url": row[14] if row[14] else None,
+                        "is_crp": bool(row[15]) if row[15] is not None else False
                     }
                 else:
                     return None

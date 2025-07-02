@@ -32,6 +32,7 @@ class PhishingDetectionResponse(BaseModel):
     screenshot_base64: Optional[str] = Field(None, description="스크린샷 Base64 데이터")
     is_redirect: Optional[bool] = Field(False, description="리다이렉트 발생 여부")
     redirect_url: Optional[str] = Field(None, description="리다이렉트된 최종 URL")
+    is_crp: Optional[bool] = Field(False, description="CRP(Content Replacement Prevention) 탐지 여부")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="서비스 상태")
@@ -133,7 +134,8 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
             "from_cache": result.get("from_cache", False),
             "detection_id": result.get("detection_id"),
             "detection_time": result.get("detection_time", datetime.now().isoformat()),
-            "screenshot_base64": result.get("screenshot_base64")
+            "screenshot_base64": result.get("screenshot_base64"),
+            "is_crp": result.get("is_crp", False)
         }
         
         return PhishingDetectionResponse(**response_data)
@@ -619,7 +621,8 @@ async def redetect_phishing(request: RedetectionRequest, http_request: Request, 
             "detection_time": datetime.now().isoformat(),  # 재검사 완료 시간
             "screenshot_base64": result.get("screenshot_base64"),
             "is_redirect": redirect_analysis.get("has_redirect", False),
-            "redirect_url": result.get("final_url") if redirect_analysis.get("has_redirect", False) else None
+            "redirect_url": result.get("final_url") if redirect_analysis.get("has_redirect", False) else None,
+            "is_crp": result.get("is_crp", False)
         }
         
         logger.info(f"재검사 완료: ID {request.detection_id}, 결과 {result.get('reason', '')} (사용자: {user_id})")
@@ -680,7 +683,8 @@ async def get_detection_result(detection_id: int, current_user: dict = get_optio
             "detection_time": detection_record.get("created_at").isoformat() if detection_record.get("created_at") else None,
             "screenshot_base64": detection_record.get("screenshot_base64"),
             "is_redirect": detection_record.get("is_redirect", False),
-            "redirect_url": detection_record.get("redirect_url")
+            "redirect_url": detection_record.get("redirect_url"),
+            "is_crp": detection_record.get("is_crp", False)
         }
         
         return PhishingDetectionResponse(**response_data)
@@ -732,7 +736,8 @@ async def get_detection_result_post(request: DetectionResultRequest, current_use
             "detection_time": detection_record.get("created_at").isoformat() if detection_record.get("created_at") else None,
             "screenshot_base64": detection_record.get("screenshot_base64"),
             "is_redirect": detection_record.get("is_redirect", False),
-            "redirect_url": detection_record.get("redirect_url")
+            "redirect_url": detection_record.get("redirect_url"),
+            "is_crp": detection_record.get("is_crp", False)
         }
         
         return PhishingDetectionResponse(**response_data)
