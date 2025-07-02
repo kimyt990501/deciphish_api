@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str
     
     # JWT 인증 설정
-    JWT_SECRET_KEY: str = secrets.token_urlsafe(32)  # 기본값 (프로덕션에서는 반드시 설정)
+    JWT_SECRET_KEY: str = "phishing-detector-jwt-secret-key-for-development-only-change-in-production"  # 개발용 고정키
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30

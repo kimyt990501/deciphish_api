@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query, Request, status
 from pydantic import BaseModel, HttpUrl, Field
-from typing import Optional
+from typing import Optional, Dict, List
 from datetime import datetime
 from app.services.detector_service import detect_phishing_base64, detect_phishing_from_url
 from app.core.exceptions import PhishingDetectorException
@@ -9,6 +9,7 @@ from app.pipeline.phishing_pipeline import phishing_detector_base64
 from app.services.web_content_collector import get_web_collector
 from app.services.phishing_detection_cache_service import phishing_cache_service
 from app.services.auth_service import auth_service, UserCreate, UserLogin, TokenResponse, UserUpdate, PasswordChange
+from app.services.api_key_service import api_key_service
 from app.core.auth_middleware import get_current_user_dep, get_current_active_user_dep, require_admin, require_user, get_optional_user_dep
 from app.core.config import settings
 
@@ -57,6 +58,47 @@ class RedetectionRequest(BaseModel):
 
 class DetectionResultRequest(BaseModel):
     detection_id: int = Field(..., description="조회할 탐지 결과 ID")
+
+# API 키 관련 모델들
+class APIKeyCreateRequest(BaseModel):
+    key_name: str = Field(..., description="API 키 이름", min_length=1, max_length=100)
+    permissions: Optional[Dict] = Field(None, description="권한 설정")
+    rate_limit_per_hour: Optional[int] = Field(None, description="시간당 요청 제한", ge=1, le=10000)
+    expires_in_days: Optional[int] = Field(180, description="만료 일수 (기본 180일)", ge=1, le=365)
+
+class APIKeyResponse(BaseModel):
+    api_key: str = Field(..., description="생성된 API 키")
+    key_name: str = Field(..., description="API 키 이름")
+    permissions: Dict = Field(..., description="권한 설정")
+    rate_limit_per_hour: int = Field(..., description="시간당 요청 제한")
+    expires_at: str = Field(..., description="만료 시간 (ISO 형식)")
+    is_active: bool = Field(..., description="활성화 상태")
+    created_at: str = Field(..., description="생성 시간 (ISO 형식)")
+
+class APIKeyListItem(BaseModel):
+    id: int = Field(..., description="API 키 ID")
+    key_name: str = Field(..., description="API 키 이름")
+    api_key_masked: str = Field(..., description="마스킹된 API 키")
+    permissions: Dict = Field(..., description="권한 설정")
+    rate_limit_per_hour: int = Field(..., description="시간당 요청 제한")
+    is_active: bool = Field(..., description="활성화 상태")
+    is_expired: bool = Field(..., description="만료 여부")
+    last_used: Optional[str] = Field(None, description="마지막 사용 시간")
+    expires_at: Optional[str] = Field(None, description="만료 시간")
+    created_at: Optional[str] = Field(None, description="생성 시간")
+
+class APIKeyListResponse(BaseModel):
+    success: bool = Field(..., description="성공 여부")
+    data: List[APIKeyListItem] = Field(..., description="API 키 목록")
+    total_count: int = Field(..., description="총 개수")
+
+class APIKeyUpdateRequest(BaseModel):
+    key_name: Optional[str] = Field(None, description="새로운 API 키 이름", min_length=1, max_length=100)
+    rate_limit_per_hour: Optional[int] = Field(None, description="새로운 시간당 요청 제한", ge=1, le=10000)
+    permissions: Optional[Dict] = Field(None, description="새로운 권한 설정")
+
+class APIKeyDeactivateRequest(BaseModel):
+    key_id: int = Field(..., description="비활성화할 API 키 ID")
 
 @router.get("/health", 
     response_model=HealthResponse,
@@ -1022,24 +1064,220 @@ async def deactivate_account(current_user: dict = get_current_active_user_dep())
     현재 로그인된 사용자의 계정을 비활성화합니다.
     """
     try:
-        success = await auth_service.deactivate_user(current_user["id"])
+        user_id = current_user.get("id")
         
-        if success:
-            return {
-                "message": "계정이 성공적으로 비활성화되었습니다.",
-                "success": True
-            }
-        else:
+        # 계정 비활성화
+        success = await auth_service.deactivate_user(user_id)
+        
+        if not success:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="계정 비활성화에 실패했습니다."
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="계정 비활성화에 실패했습니다"
             )
-    
+        
+        logger.info(f"사용자 계정 비활성화: {current_user.get('username')}")
+        return {"message": "계정이 성공적으로 비활성화되었습니다"}
+        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"계정 비활성화 중 오류: {e}")
+        logger.error(f"계정 비활성화 실패: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="계정 비활성화 중 오류가 발생했습니다."
+            detail="계정 비활성화 중 오류가 발생했습니다"
+        )
+
+# API 키 관련 엔드포인트들
+@router.post("/api-keys/create",
+    response_model=APIKeyResponse,
+    summary="API 키 생성",
+    description="새로운 API 키를 생성합니다. 기본 만료 기간은 180일입니다.")
+async def create_api_key(request: APIKeyCreateRequest, current_user: dict = get_current_active_user_dep()):
+    """
+    API 키 생성 API
+    
+    로그인한 사용자를 위한 새로운 API 키를 생성합니다.
+    - 키 이름은 사용자별로 고유해야 합니다
+    - 기본 만료 기간: 180일
+    - 기본 시간당 요청 제한: 1000회
+    """
+    try:
+        user_id = current_user.get("id")
+        
+        # API 키 생성
+        api_key_data = await api_key_service.create_api_key(
+            user_id=user_id,
+            key_name=request.key_name,
+            permissions=request.permissions,
+            rate_limit_per_hour=request.rate_limit_per_hour,
+            expires_in_days=request.expires_in_days
+        )
+        
+        if not api_key_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="API 키 생성에 실패했습니다. 키 이름이 중복되었을 수 있습니다."
+            )
+        
+        logger.info(f"API 키 생성됨: 사용자 {user_id}, 키 이름 '{request.key_name}'")
+        return APIKeyResponse(**api_key_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API 키 생성 실패: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API 키 생성 중 오류가 발생했습니다"
+        )
+
+@router.get("/api-keys",
+    response_model=APIKeyListResponse,
+    summary="API 키 목록 조회",
+    description="현재 사용자의 API 키 목록을 조회합니다.")
+async def get_api_keys(
+    include_inactive: bool = Query(False, description="비활성 키도 포함할지 여부"),
+    current_user: dict = get_current_active_user_dep()
+):
+    """
+    API 키 목록 조회 API
+    
+    현재 로그인한 사용자의 API 키 목록을 조회합니다.
+    보안상 실제 API 키는 일부만 마스킹되어 표시됩니다.
+    """
+    try:
+        user_id = current_user.get("id")
+        
+        # API 키 목록 조회
+        api_keys = await api_key_service.get_user_api_keys(user_id, include_inactive)
+        
+        return APIKeyListResponse(
+            success=True,
+            data=[APIKeyListItem(**key) for key in api_keys],
+            total_count=len(api_keys)
+        )
+        
+    except Exception as e:
+        logger.error(f"API 키 목록 조회 실패: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API 키 목록 조회 중 오류가 발생했습니다"
+        )
+
+@router.put("/api-keys/{key_id}",
+    summary="API 키 정보 수정",
+    description="API 키의 이름, 요청 제한, 권한을 수정합니다.")
+async def update_api_key(
+    key_id: int,
+    request: APIKeyUpdateRequest,
+    current_user: dict = get_current_active_user_dep()
+):
+    """
+    API 키 정보 수정 API
+    
+    API 키의 이름, 시간당 요청 제한, 권한 설정을 수정할 수 있습니다.
+    실제 API 키 값은 변경되지 않습니다.
+    """
+    try:
+        user_id = current_user.get("id")
+        
+        # API 키 업데이트
+        success = await api_key_service.update_api_key(
+            user_id=user_id,
+            key_id=key_id,
+            key_name=request.key_name,
+            rate_limit_per_hour=request.rate_limit_per_hour,
+            permissions=request.permissions
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API 키를 찾을 수 없거나 권한이 없습니다"
+            )
+        
+        logger.info(f"API 키 업데이트됨: 사용자 {user_id}, 키 ID {key_id}")
+        return {"success": True, "message": "API 키가 성공적으로 업데이트되었습니다"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API 키 업데이트 실패: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API 키 업데이트 중 오류가 발생했습니다"
+        )
+
+@router.delete("/api-keys/{key_id}",
+    summary="API 키 비활성화",
+    description="API 키를 비활성화합니다.")
+async def deactivate_api_key(
+    key_id: int,
+    current_user: dict = get_current_active_user_dep()
+):
+    """
+    API 키 비활성화 API
+    
+    지정한 API 키를 비활성화합니다.
+    비활성화된 키는 더 이상 사용할 수 없지만 기록은 유지됩니다.
+    """
+    try:
+        user_id = current_user.get("id")
+        
+        # API 키 비활성화
+        success = await api_key_service.deactivate_api_key(user_id, key_id)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API 키를 찾을 수 없거나 권한이 없습니다"
+            )
+        
+        logger.info(f"API 키 비활성화됨: 사용자 {user_id}, 키 ID {key_id}")
+        return {"success": True, "message": "API 키가 성공적으로 비활성화되었습니다"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API 키 비활성화 실패: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API 키 비활성화 중 오류가 발생했습니다"
+        )
+
+@router.post("/api-keys/deactivate",
+    summary="API 키 비활성화 (POST)",
+    description="POST 방식으로 API 키를 비활성화합니다.")
+async def deactivate_api_key_post(
+    request: APIKeyDeactivateRequest,
+    current_user: dict = get_current_active_user_dep()
+):
+    """
+    API 키 비활성화 API (POST 방식)
+    
+    POST 방식으로 API 키를 비활성화합니다.
+    프론트엔드에서 더 편리하게 사용할 수 있습니다.
+    """
+    try:
+        user_id = current_user.get("id")
+        
+        # API 키 비활성화
+        success = await api_key_service.deactivate_api_key(user_id, request.key_id)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API 키를 찾을 수 없거나 권한이 없습니다"
+            )
+        
+        logger.info(f"API 키 비활성화됨 (POST): 사용자 {user_id}, 키 ID {request.key_id}")
+        return {"success": True, "message": "API 키가 성공적으로 비활성화되었습니다"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API 키 비활성화 실패 (POST): {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API 키 비활성화 중 오류가 발생했습니다"
         )

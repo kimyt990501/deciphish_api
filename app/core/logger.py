@@ -10,7 +10,7 @@ log_dir.mkdir(exist_ok=True)
 
 # 로거 설정
 logger = logging.getLogger("phishing_detector")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 # 기존 핸들러 제거 (중복 방지)
 for handler in logger.handlers[:]:
@@ -25,7 +25,7 @@ file_handler = TimedRotatingFileHandler(
     backupCount=30,  # 30일치 로그 파일 보관
     encoding="utf-8"
 )
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.DEBUG)
 
 # 로그 파일명을 phishing_detector_YYYYMMDD.log 형태로 변경
 file_handler.suffix = "%Y%m%d"
@@ -33,7 +33,7 @@ file_handler.namer = lambda name: name.replace(".log", "") + "_" + name.split(".
 
 # 콘솔 핸들러
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.DEBUG)
 
 # 포맷터
 formatter = logging.Formatter(

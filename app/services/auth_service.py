@@ -109,6 +109,46 @@ class AuthService:
         except jwt.JWTError:
             return None
     
+    async def verify_token_and_get_user(self, token: str, token_type: str = "access") -> Optional[dict]:
+        """토큰 검증 후 사용자 정보 반환"""
+        try:
+            logger.debug(f"JWT 토큰 디코드 시도: {token[:20]}...")
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            logger.debug(f"JWT payload 디코드 성공: {payload}")
+            
+            if payload.get("type") != token_type:
+                logger.debug(f"JWT 토큰 타입 불일치: 예상={token_type}, 실제={payload.get('type')}")
+                return None
+            
+            # payload에서 사용자 ID 추출
+            user_id = payload.get("sub")
+            logger.debug(f"JWT에서 추출한 user_id: {user_id}")
+            
+            if not user_id:
+                logger.debug("JWT payload에 'sub' 필드 없음")
+                return None
+            
+            # 사용자 정보 조회
+            logger.debug(f"사용자 정보 조회 시도: user_id={user_id}")
+            user = await self.get_user_by_id(int(user_id))
+            
+            if user:
+                logger.debug(f"사용자 정보 조회 성공: {user.get('username')} (활성: {user.get('is_active')})")
+            else:
+                logger.debug(f"사용자 정보 조회 실패: user_id={user_id}")
+            
+            return user
+            
+        except jwt.ExpiredSignatureError:
+            logger.debug("JWT 토큰이 만료됨")
+            return None
+        except jwt.JWTError as e:
+            logger.debug(f"JWT 토큰 오류: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"토큰 검증 중 오류: {e}")
+            return None
+    
     async def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         """사용자명으로 사용자 조회"""
         try:
