@@ -29,6 +29,7 @@ requests==2.32.4
 beautifulsoup4==4.13.4
 duckduckgo-search==4.1.1
 googlesearch-python==1.2.3
+chardet==5.2.0
 
 # FAISS 벡터 검색
 faiss-cpu==1.11.0

@@ -10,6 +10,8 @@ from PIL import Image
 from app.core.logger import logger
 import random
 import time
+import chardet
+import codecs
 
 class WebContentCollector:
     def __init__(self, timeout: int = 10, max_redirects: int = 5):
@@ -74,6 +76,115 @@ class WebContentCollector:
             "Upgrade-Insecure-Requests": "1"
         }
     
+    def _detect_encoding(self, content: bytes, content_type: str = "") -> str:
+        """
+        바이트 콘텐츠의 인코딩을 감지합니다.
+        
+        Args:
+            content: 바이트 콘텐츠
+            content_type: HTTP Content-Type 헤더
+            
+        Returns:
+            감지된 인코딩명
+        """
+        # 1. Content-Type 헤더에서 charset 추출
+        charset_match = re.search(r'charset=([^;]+)', content_type, re.IGNORECASE)
+        if charset_match:
+            charset = charset_match.group(1).strip().strip('"\'')
+            logger.debug(f"Content-Type에서 charset 감지: {charset}")
+            try:
+                # 인코딩 유효성 검사
+                codecs.lookup(charset)
+                return charset
+            except LookupError:
+                logger.warning(f"유효하지 않은 charset: {charset}")
+        
+        # 2. HTML meta 태그에서 charset 추출
+        html_start = content[:2048]  # 처음 2KB만 확인
+        try:
+            html_text = html_start.decode('utf-8', errors='ignore')
+            
+            # <meta charset="..."> 형태
+            meta_charset = re.search(r'<meta[^>]+charset=[\'"]*([^\'">]+)', html_text, re.IGNORECASE)
+            if meta_charset:
+                charset = meta_charset.group(1).strip()
+                logger.debug(f"HTML meta에서 charset 감지: {charset}")
+                try:
+                    codecs.lookup(charset)
+                    return charset
+                except LookupError:
+                    logger.warning(f"유효하지 않은 meta charset: {charset}")
+            
+            # <meta http-equiv="Content-Type" content="text/html; charset=..."> 형태
+            meta_http_equiv = re.search(r'<meta[^>]+http-equiv=[\'"]?content-type[\'"]?[^>]+content=[\'"]?[^\'">]*charset=([^\'">]+)', html_text, re.IGNORECASE)
+            if meta_http_equiv:
+                charset = meta_http_equiv.group(1).strip()
+                logger.debug(f"HTML meta http-equiv에서 charset 감지: {charset}")
+                try:
+                    codecs.lookup(charset)
+                    return charset
+                except LookupError:
+                    logger.warning(f"유효하지 않은 meta http-equiv charset: {charset}")
+        
+        except Exception as e:
+            logger.warning(f"HTML meta 태그 파싱 중 오류: {e}")
+        
+        # 3. chardet를 사용한 인코딩 감지
+        try:
+            detected = chardet.detect(content)
+            if detected and detected['confidence'] > 0.7:
+                charset = detected['encoding']
+                logger.debug(f"chardet로 감지된 인코딩: {charset} (신뢰도: {detected['confidence']:.2f})")
+                return charset
+        except Exception as e:
+            logger.warning(f"chardet 인코딩 감지 중 오류: {e}")
+        
+        # 4. 한국어 사이트의 일반적인 인코딩 시도
+        korean_encodings = ['utf-8', 'euc-kr', 'cp949', 'iso-8859-1']
+        for encoding in korean_encodings:
+            try:
+                decoded = content.decode(encoding)
+                # 한글 문자가 있는지 확인
+                if any('\uac00' <= c <= '\ud7af' for c in decoded[:1000]):
+                    logger.debug(f"한글 문자 감지로 인코딩 추정: {encoding}")
+                    return encoding
+            except UnicodeDecodeError:
+                continue
+        
+        # 5. 기본값으로 UTF-8 반환
+        logger.debug("인코딩 감지 실패, UTF-8로 기본 설정")
+        return 'utf-8'
+    
+    def _decode_content(self, content: bytes, content_type: str = "") -> str:
+        """
+        바이트 콘텐츠를 문자열로 디코딩합니다.
+        
+        Args:
+            content: 바이트 콘텐츠
+            content_type: HTTP Content-Type 헤더
+            
+        Returns:
+            디코딩된 문자열
+        """
+        # 인코딩 감지
+        encoding = self._detect_encoding(content, content_type)
+        
+        # 디코딩 시도
+        encodings_to_try = [encoding, 'utf-8', 'euc-kr', 'cp949', 'iso-8859-1', 'latin-1']
+        
+        for enc in encodings_to_try:
+            try:
+                decoded = content.decode(enc)
+                logger.debug(f"디코딩 성공: {enc}")
+                return decoded
+            except UnicodeDecodeError as e:
+                logger.debug(f"디코딩 실패 ({enc}): {e}")
+                continue
+        
+        # 모든 디코딩 실패 시 에러 무시하고 UTF-8로 디코딩
+        logger.warning("모든 인코딩 시도 실패, UTF-8로 강제 디코딩")
+        return content.decode('utf-8', errors='ignore')
+    
     def _get_random_user_agent(self) -> str:
         """랜덤 User-Agent 반환"""
         return random.choice(self.user_agents)
@@ -81,9 +192,9 @@ class WebContentCollector:
     def _is_legacy_browser(self, user_agent: str) -> bool:
         """오래된 브라우저인지 확인"""
         legacy_indicators = [
-            "Chrome/6", "Chrome/5", "Chrome/5", "Chrome/5", "Chrome/5",
-            "Firefox/5", "Firefox/5", "Firefox/5", "Firefox/5", "Firefox/5",
-            "Safari/60", "Safari/60", "Safari/60", "Safari/60", "Safari/60"
+            "Chrome/6", "Chrome/5", "Chrome/58", "Chrome/60", "Chrome/61",
+            "Firefox/54", "Firefox/55", "Firefox/56", "Firefox/57", "Firefox/58",
+            "Safari/601", "Safari/602", "Safari/603", "Safari/604", "Safari/605"
         ]
         return any(indicator in user_agent for indicator in legacy_indicators)
     
@@ -101,7 +212,7 @@ class WebContentCollector:
     
     def download_html(self, url: str) -> Optional[str]:
         """
-        URL에서 HTML 다운로드 (강화된 재시도 로직)
+        URL에서 HTML 다운로드 (개선된 인코딩 처리)
         
         Args:
             url: 다운로드할 URL
@@ -123,10 +234,10 @@ class WebContentCollector:
                 response = self.session.get(url, headers=headers, timeout=self.timeout)
                 response.raise_for_status()
                 
-                # 인코딩 설정
-                response.encoding = response.apparent_encoding
+                # 개선된 인코딩 처리
+                content_type = response.headers.get('content-type', '')
+                html_content = self._decode_content(response.content, content_type)
                 
-                html_content = response.text
                 logger.info(f"Successfully downloaded HTML ({len(html_content)} characters)")
                 return html_content
                 
@@ -157,47 +268,6 @@ class WebContentCollector:
                 return None
         
         return None
-        try:
-            logger.info(f"Downloading HTML from: {url}")
-            
-            # 헤더 설정
-            headers = self._get_headers()
-            
-            # 요청 전송
-            response = self.session.get(url, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-            
-            # 인코딩 설정
-            response.encoding = response.apparent_encoding
-            
-            html_content = response.text
-            logger.info(f"Successfully downloaded HTML ({len(html_content)} characters)")
-            return html_content
-            
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 403:
-                logger.warning(f"403 Forbidden for {url}, trying with different User-Agent")
-                # 다른 User-Agent로 재시도
-                try:
-                    headers = self._get_headers()
-                    response = self.session.get(url, headers=headers, timeout=self.timeout)
-                    response.raise_for_status()
-                    response.encoding = response.apparent_encoding
-                    html_content = response.text
-                    logger.info(f"Successfully downloaded HTML with retry ({len(html_content)} characters)")
-                    return html_content
-                except Exception as retry_e:
-                    logger.error(f"Retry failed for {url}: {retry_e}")
-                    return None
-            else:
-                logger.error(f"HTTP error downloading HTML from {url}: {e}")
-                return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to download HTML from {url}: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error downloading HTML from {url}: {e}")
-            return None
     
     def _extract_favicon_links(self, html: str, base_url: str) -> List[Tuple[str, int]]:
         """
