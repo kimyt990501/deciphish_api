@@ -12,14 +12,20 @@ from app.services.auth_service import auth_service, UserCreate, UserLogin, Token
 from app.services.api_key_service import api_key_service
 from app.core.auth_middleware import get_current_user_dep, get_current_active_user_dep, require_admin, require_user, get_optional_user_dep
 from app.core.config import settings
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter()
+
+# 동시 처리 제한을 위한 세마포어
+detection_semaphore = asyncio.Semaphore(settings.CONCURRENT_DETECTION_LIMIT)
 
 class PhishingDetectionRequest(BaseModel):
     url: HttpUrl = Field(..., description="분석할 URL")
     use_manual_content: bool = Field(False, description="수동으로 제공된 컨텐츠 사용 여부")
     html_content: Optional[str] = Field(None, description="수동으로 제공된 HTML 컨텐츠")
     favicon_base64: Optional[str] = Field(None, description="수동으로 제공된 파비콘 (Base64)")
+    async_mode: bool = Field(False, description="비동기 모드 (즉시 응답, 백그라운드 처리)")
 
 class PhishingDetectionResponse(BaseModel):
     is_phish: int = Field(..., description="피싱 여부 (0: 정상, 1: 피싱)")
@@ -34,6 +40,7 @@ class PhishingDetectionResponse(BaseModel):
     is_redirect: Optional[bool] = Field(False, description="리다이렉트 발생 여부")
     redirect_url: Optional[str] = Field(None, description="리다이렉트된 최종 URL")
     is_crp: Optional[bool] = Field(False, description="CRP(Content Replacement Prevention) 탐지 여부")
+    processing_status: Optional[str] = Field(None, description="처리 상태 (immediate, background, cached)")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="서비스 상태")
@@ -111,6 +118,22 @@ async def health_check():
         message="Phishing Detection API is running"
     )
 
+async def process_phishing_detection_with_semaphore(url: str, html_content: Optional[str], 
+                                                   favicon_base64: Optional[str], 
+                                                   user_id: Optional[int], 
+                                                   ip_address: str, user_agent: str):
+    """세마포어를 사용한 제한된 동시성 피싱 탐지"""
+    async with detection_semaphore:
+        return await phishing_detector_base64(
+            url=url,
+            html=html_content,
+            favicon_b64=favicon_base64 or "",
+            brand_list=[],
+            user_id=user_id,
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+
 @router.post("/detect", 
     response_model=PhishingDetectionResponse,
     summary="피싱 사이트 탐지",
@@ -138,11 +161,10 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
         
         if request.use_manual_content and request.html_content:
             # 수동 컨텐츠 사용
-            result = await phishing_detector_base64(
+            result = await process_phishing_detection_with_semaphore(
                 url=url,
-                html=request.html_content,
-                favicon_b64=request.favicon_base64 or "",
-                brand_list=[],
+                html_content=request.html_content,
+                favicon_base64=request.favicon_base64,
                 user_id=user_id,
                 ip_address=ip_address,
                 user_agent=user_agent
@@ -150,16 +172,15 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
         else:
             # 자동 컨텐츠 수집 및 탐지
             collector = get_web_collector()
-            html_content, favicon_base64 = collector.collect_web_content(url)
+            html_content, favicon_base64 = await collector.collect_web_content(url)
             
             if not html_content:
                 raise HTTPException(status_code=400, detail="Failed to collect web content")
             
-            result = await phishing_detector_base64(
+            result = await process_phishing_detection_with_semaphore(
                 url=url,
-                html=html_content,
-                favicon_b64=favicon_base64 or "",
-                brand_list=[],
+                html_content=html_content,
+                favicon_base64=favicon_base64,
                 user_id=user_id,
                 ip_address=ip_address,
                 user_agent=user_agent
@@ -177,7 +198,8 @@ async def detect_phishing_endpoint(request: PhishingDetectionRequest, http_reque
             "detection_id": result.get("detection_id"),
             "detection_time": result.get("detection_time", datetime.now().isoformat()),
             "screenshot_base64": result.get("screenshot_base64"),
-            "is_crp": result.get("is_crp", False)
+            "is_crp": result.get("is_crp", False),
+            "processing_status": "cached" if result.get("from_cache", False) else "immediate"
         }
         
         return PhishingDetectionResponse(**response_data)
@@ -209,7 +231,7 @@ async def detect_phishing(request: URLRequest, http_request: Request, current_us
         
         # 2. 웹 콘텐츠 수집
         collector = get_web_collector()
-        html_content, favicon_base64 = collector.collect_web_content(request.url)
+        html_content, favicon_base64 = await collector.collect_web_content(request.url)
         
         if not html_content:
             raise HTTPException(status_code=400, detail="Failed to collect web content")
@@ -549,7 +571,7 @@ async def check_phish_simple(payload: SimplePhishingRequest, http_request: Reque
         
         # 2. 웹 콘텐츠 수집
         collector = get_web_collector()
-        html_content, favicon_base64 = collector.collect_web_content(url)
+        html_content, favicon_base64 = await collector.collect_web_content(url)
         
         if not html_content:
             logger.error(f"Failed to collect web content for URL: {url}")
@@ -621,7 +643,7 @@ async def redetect_phishing(request: RedetectionRequest, http_request: Request, 
         
         # 2. 웹 콘텐츠 수집
         collector = get_web_collector()
-        html_content, favicon_base64 = collector.collect_web_content(url)
+        html_content, favicon_base64 = await collector.collect_web_content(url)
         
         if not html_content:
             raise HTTPException(status_code=400, detail="웹 콘텐츠 수집에 실패했습니다.")

@@ -1,6 +1,7 @@
 # FastAPI 및 웹 프레임워크
 fastapi==0.115.12
 uvicorn==0.34.3
+gunicorn==21.2.0
 pydantic==2.11.5
 pydantic-settings==2.9.1
 
@@ -26,6 +27,7 @@ numpy==2.2.6
 
 # 웹 스크래핑
 requests==2.32.4
+aiohttp==3.11.0
 beautifulsoup4==4.13.4
 duckduckgo-search==4.1.1
 googlesearch-python==1.2.3

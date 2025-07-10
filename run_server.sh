@@ -16,9 +16,24 @@ mkdir -p logs
 # echo "Installing required packages..."
 # pip install -r requirements.txt
 
-# 서버 실행 (백그라운드)
-echo "Starting Phishing Detector API (New) server in background..."
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8300 --log-level info > logs/server.log 2>&1 &
+# 서버 실행 (백그라운드) - 동시성 최적화
+echo "Starting Phishing Detector API (New) server in background with optimized settings..."
+
+# CPU 코어 수 계산 (최소 1, 최대 4)
+WORKERS=$(python3 -c "import os; print(min(4, max(1, os.cpu_count() or 1)))")
+echo "Using $WORKERS workers"
+
+nohup uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8300 \
+    --workers $WORKERS \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --max-requests 1000 \
+    --max-requests-jitter 100 \
+    --timeout-keep-alive 10 \
+    --limit-concurrency 200 \
+    --limit-max-requests 1000 \
+    --log-level info > logs/server.log 2>&1 &
 
 # 프로세스 ID 저장
 echo $! > logs/server.pid

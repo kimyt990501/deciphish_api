@@ -2,6 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.endpoints import router
 from app.core.middleware import RequestTimingMiddleware
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import os
+
+# 스레드풀 설정 (CPU 코어 수의 2배)
+max_workers = min(32, (os.cpu_count() or 1) * 2)
+thread_pool = ThreadPoolExecutor(max_workers=max_workers)
 
 app = FastAPI(
     title="Phishing Detector API (New)",
@@ -17,11 +24,25 @@ app = FastAPI(
     ## 사용 방법
     1. URL, HTML, 파비콘을 전송
     2. 피싱 여부와 탐지된 브랜드 정보 반환
+    
+    ## 동시성 처리
+    * 최대 {max_workers}개의 요청을 동시에 처리
+    * 블로킹 작업들은 스레드풀에서 실행
     """,
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# 앱 시작 시 스레드풀을 앱 상태에 저장
+@app.on_event("startup")
+async def startup_event():
+    app.state.thread_pool = thread_pool
+
+# 앱 종료 시 스레드풀 정리
+@app.on_event("shutdown")
+async def shutdown_event():
+    thread_pool.shutdown(wait=True)
 
 # CORS 설정
 app.add_middleware(

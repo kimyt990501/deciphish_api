@@ -1,4 +1,5 @@
-import requests
+import aiohttp
+import asyncio
 from bs4 import BeautifulSoup
 import base64
 from typing import Dict, Optional, Tuple, List
@@ -24,8 +25,6 @@ class WebContentCollector:
         """
         self.timeout = timeout
         self.max_redirects = max_redirects
-        self.session = requests.Session()
-        self.session.max_redirects = max_redirects
         self._seen_hashes: set = set()
         
         # 다양한 User-Agent 설정 (더 많은 옵션 추가)
@@ -155,7 +154,7 @@ class WebContentCollector:
         logger.debug("인코딩 감지 실패, UTF-8로 기본 설정")
         return 'utf-8'
     
-    def _decode_content(self, content: bytes, content_type: str = "") -> str:
+    async def _decode_content(self, content: bytes, content_type: str = "") -> str:
         """
         바이트 콘텐츠를 문자열로 디코딩합니다.
         
@@ -210,7 +209,7 @@ class WebContentCollector:
         headers["User-Agent"] = user_agent
         return headers
     
-    def download_html(self, url: str) -> Optional[str]:
+    async def download_html(self, url: str) -> Optional[str]:
         """
         URL에서 HTML 다운로드 (개선된 인코딩 처리)
         
@@ -231,33 +230,41 @@ class WebContentCollector:
                 headers = self._get_headers()
                 
                 # 요청 전송
-                response = self.session.get(url, headers=headers, timeout=self.timeout)
-                response.raise_for_status()
+                timeout = aiohttp.ClientTimeout(total=self.timeout)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url, headers=headers) as response:
+                        if response.status == 403:
+                            logger.warning(f"403 Forbidden for {url} (attempt {attempt + 1}/{max_retries})")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(retry_delay)
+                                retry_delay *= 2  # 지수 백오프
+                                continue
+                            else:
+                                logger.error(f"All retry attempts failed for {url}: 403 Forbidden")
+                                return None
+                        
+                        response.raise_for_status()
+                        
+                        # 개선된 인코딩 처리
+                        content_type = response.headers.get('content-type', '')
+                        html_content = await self._decode_content(await response.read(), content_type)
+                        
+                        logger.info(f"Successfully downloaded HTML ({len(html_content)} characters)")
+                        return html_content
                 
-                # 개선된 인코딩 처리
-                content_type = response.headers.get('content-type', '')
-                html_content = self._decode_content(response.content, content_type)
-                
-                logger.info(f"Successfully downloaded HTML ({len(html_content)} characters)")
-                return html_content
-                
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 403:
-                    logger.warning(f"403 Forbidden for {url} (attempt {attempt + 1}/{max_retries})")
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # 지수 백오프
-                        continue
-                    else:
-                        logger.error(f"All retry attempts failed for {url}: 403 Forbidden")
-                        return None
-                else:
-                    logger.error(f"HTTP error downloading HTML from {url}: {e}")
-                    return None
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Request error downloading HTML from {url} (attempt {attempt + 1}/{max_retries}): {e}")
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"HTTP error downloading HTML from {url} (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    logger.error(f"All retry attempts failed for {url}")
+                    return None
+            except aiohttp.ClientError as e:
+                logger.error(f"Client error downloading HTML from {url} (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
                     retry_delay *= 2
                     continue
                 else:
@@ -435,7 +442,7 @@ class WebContentCollector:
         self._seen_hashes.add(hash_str)
         return False
     
-    def download_favicon(self, favicon_url: str) -> Optional[str]:
+    async def download_favicon(self, favicon_url: str) -> Optional[str]:
         """
         favicon URL에서 이미지 다운로드하여 base64로 인코딩
         
@@ -447,47 +454,50 @@ class WebContentCollector:
         """
         try:
             logger.info(f"Downloading favicon from: {favicon_url}")
-            response = self.session.get(favicon_url, headers=self._get_headers(), timeout=10)
-            response.raise_for_status()
-            
-            content = response.content
-            content_type = response.headers.get("content-type", "").lower()
-            
-            # HTML/텍스트 콘텐츠 체크
-            if any(t in content_type for t in ["html", "text"]) and "image" not in content_type:
-                logger.warning(f"Text content detected: {favicon_url} ({content_type})")
-                return None
-            
-            # HTML 콘텐츠 체크
-            if b"<html" in content[:1000].lower():
-                logger.warning(f"HTML content detected: {favicon_url}")
-                return None
-            
-            # 이미지 유효성 검사
-            if not self._is_valid_image(content):
-                logger.warning(f"Invalid image content: {favicon_url}")
-                return None
-            
-            # 중복 이미지 체크
-            h = self._get_image_hash(content)
-            if self._is_duplicate(h):
-                logger.info(f"Duplicate image detected: {favicon_url}")
-                return None
-            
-            # base64 인코딩
-            base64_data = base64.b64encode(content).decode('utf-8')
-            
-            logger.info(f"Successfully downloaded favicon ({len(content)} bytes)")
-            return base64_data
-            
-        except requests.exceptions.RequestException as e:
+            headers = self._get_headers()
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(favicon_url, headers=headers) as response:
+                    response.raise_for_status()
+                    
+                    content = await response.read()
+                    content_type = response.headers.get("content-type", "").lower()
+                    
+                    # HTML/텍스트 콘텐츠 체크
+                    if any(t in content_type for t in ["html", "text"]) and "image" not in content_type:
+                        logger.warning(f"Text content detected: {favicon_url} ({content_type})")
+                        return None
+                    
+                    # HTML 콘텐츠 체크
+                    if b"<html" in content[:1000].lower():
+                        logger.warning(f"HTML content detected: {favicon_url}")
+                        return None
+                    
+                    # 이미지 유효성 검사
+                    if not self._is_valid_image(content):
+                        logger.warning(f"Invalid image content: {favicon_url}")
+                        return None
+                    
+                    # 중복 이미지 체크
+                    h = self._get_image_hash(content)
+                    if self._is_duplicate(h):
+                        logger.info(f"Duplicate image detected: {favicon_url}")
+                        return None
+                    
+                    # base64 인코딩
+                    base64_data = base64.b64encode(content).decode('utf-8')
+                    
+                    logger.info(f"Successfully downloaded favicon ({len(content)} bytes)")
+                    return base64_data
+                    
+        except aiohttp.ClientError as e:
             logger.error(f"Failed to download favicon from {favicon_url}: {e}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error downloading favicon from {favicon_url}: {e}")
             return None
     
-    def collect_favicon(self, html: str, base_url: str) -> Optional[str]:
+    async def collect_favicon(self, html: str, base_url: str) -> Optional[str]:
         """
         HTML에서 favicon을 수집하여 base64로 반환
         
@@ -509,7 +519,7 @@ class WebContentCollector:
         for favicon_url, score in favicon_candidates:
             logger.info(f"Trying favicon candidate (score {score}): {favicon_url}")
             
-            favicon_base64 = self.download_favicon(favicon_url)
+            favicon_base64 = await self.download_favicon(favicon_url)
             if favicon_base64:
                 logger.info(f"Successfully collected favicon from: {favicon_url}")
                 return favicon_base64
@@ -517,7 +527,7 @@ class WebContentCollector:
         logger.warning(f"No valid favicon found after trying {len(favicon_candidates)} candidates")
         return None
     
-    def collect_web_content(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+    async def collect_web_content(self, url: str) -> Tuple[Optional[str], Optional[str]]:
         """
         URL에서 HTML과 favicon을 모두 수집
         
@@ -529,12 +539,12 @@ class WebContentCollector:
         """
         try:
             # HTML 다운로드
-            html_content = self.download_html(url)
+            html_content = await self.download_html(url)
             if not html_content:
                 return None, None
             
             # favicon 수집
-            favicon_base64 = self.collect_favicon(html_content, url)
+            favicon_base64 = await self.collect_favicon(html_content, url)
             
             return html_content, favicon_base64
             

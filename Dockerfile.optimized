@@ -88,5 +88,9 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8300/api/v1/health || exit 1
 
-# 서버 실행
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8300", "--log-level", "info"] 
+# 동시성 최적화를 위한 엔트리포인트 스크립트 생성
+COPY docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
+# 서버 실행 (최적화된 설정)
+CMD ["/app/docker-entrypoint.sh"] 

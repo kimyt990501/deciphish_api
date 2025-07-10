@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 import secrets
+import os
 
 class Settings(BaseSettings):
     MYSQL_HOST: str
@@ -45,6 +46,11 @@ class Settings(BaseSettings):
     # 환경 설정
     ENVIRONMENT: str = "development"  # development, production
     DEBUG: bool = True
+
+    # 동시성 처리 설정
+    CONCURRENT_DETECTION_LIMIT: int = 10
+    MAX_WORKERS: int = 4
+    REQUEST_TIMEOUT: int = 30
 
     class Config:
         env_file = ".env"

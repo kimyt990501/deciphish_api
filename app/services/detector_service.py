@@ -28,7 +28,7 @@ async def detect_phishing_from_url(url: str):
         
         # 웹 콘텐츠 수집
         web_collector = get_web_collector()
-        html_content, favicon_base64 = web_collector.collect_web_content(url)
+        html_content, favicon_base64 = await web_collector.collect_web_content(url)
         
         if not html_content:
             logger.error(f"Failed to download HTML from {url}")

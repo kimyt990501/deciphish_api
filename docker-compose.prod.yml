@@ -46,6 +46,11 @@ services:
       - MYSQL_USER=${MYSQL_USER:-phishing_user}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-phishing_password}
       - MYSQL_DB=${MYSQL_DB:-phishing_detector}
+      # 동시성 처리 설정 (프로덕션 최적화)
+      - CONCURRENT_DETECTION_LIMIT=${CONCURRENT_DETECTION_LIMIT:-20}
+      - MAX_WORKERS=${MAX_WORKERS:-4}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-60}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       # 로그 디렉토리 마운트
       - ./logs:/app/logs

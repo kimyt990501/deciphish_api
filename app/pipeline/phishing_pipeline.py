@@ -162,43 +162,41 @@ async def get_final_url(url: str) -> tuple[str, dict]:
         if is_suspicious:
             print(f"원본 URL이 의심스러움: {reason}")
         
-        # http_service 대신 직접 requests 사용 (더 간단하고 안정적)
-        import requests
+        # aiohttp를 사용한 비동기 요청 (더 간단하고 안정적)
+        import aiohttp
         
         # 타임아웃과 함께 요청
-        response = requests.get(
-            url, 
-            allow_redirects=True, 
-            timeout=10,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        )
+        timeout = aiohttp.ClientTimeout(total=10)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         
-        final_url = response.url
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers, allow_redirects=True) as response:
+                final_url = str(response.url)
+                
+                # 리다이렉트 발생 여부 확인
+                if final_url != url:
+                    redirect_analysis["has_redirect"] = True
+                    redirect_analysis["redirect_count"] = len(response.history)
+                    
+                    print(f"리다이렉트 탐지됨: {url} -> {final_url}")
+                    print(f"리다이렉트 체인: {len(response.history)}개 단계")
+                    
+                    # 리다이렉트 체인 기록
+                    redirect_chain = [url]
+                    for resp in response.history:
+                        redirect_chain.append(str(resp.url))
+                    redirect_chain.append(final_url)
+                    redirect_analysis["redirect_chain"] = redirect_chain
+                    
+                else:
+                    print(f"리다이렉트 없음: {url}")
+                
+                print(f"최종 상태코드: {response.status}")
+                return final_url, redirect_analysis
         
-        # 리다이렉트 발생 여부 확인
-        if final_url != url:
-            redirect_analysis["has_redirect"] = True
-            redirect_analysis["redirect_count"] = len(response.history)
-            
-            print(f"리다이렉트 탐지됨: {url} -> {final_url}")
-            print(f"리다이렉트 체인: {len(response.history)}개 단계")
-            
-            # 리다이렉트 체인 기록
-            redirect_chain = [url]
-            for resp in response.history:
-                redirect_chain.append(resp.url)
-            redirect_chain.append(final_url)
-            redirect_analysis["redirect_chain"] = redirect_chain
-            
-        else:
-            print(f"리다이렉트 없음: {url}")
-        
-        print(f"최종 상태코드: {response.status_code}")
-        return final_url, redirect_analysis
-        
-    except requests.exceptions.RequestException as e:
+    except aiohttp.ClientError as e:
         print(f"네트워크 오류로 인한 리다이렉트 확인 실패: {e}")
         print(f"원본 URL 사용: {url}")
         return url, redirect_analysis
