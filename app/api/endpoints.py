@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query, Request, status
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query, Request, status, UploadFile, File
 from pydantic import BaseModel, HttpUrl, Field
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -12,6 +12,7 @@ from app.services.auth_service import auth_service, UserCreate, UserLogin, Token
 from app.services.api_key_service import api_key_service
 from app.core.auth_middleware import get_current_user_dep, get_current_active_user_dep, require_admin, require_user, get_optional_user_dep
 from app.core.config import settings
+from app.services.qr_service import qr_service
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -65,6 +66,19 @@ class RedetectionRequest(BaseModel):
 
 class DetectionResultRequest(BaseModel):
     detection_id: int = Field(..., description="조회할 탐지 결과 ID")
+
+# QR 코드 관련 모델들
+class QRCodeGenerationRequest(BaseModel):
+    text: str = Field(..., description="QR 코드에 포함할 텍스트 (URL)")
+    include_logo: bool = Field(True, description="로고 포함 여부")
+
+class QRCodeGenerationResponse(BaseModel):
+    image_base64: str = Field(..., description="생성된 QR 코드 이미지 (Base64 data URL)")
+    text: str = Field(..., description="QR 코드에 포함된 텍스트")
+
+class QRCodeDetectionResponse(BaseModel):
+    extracted_url: str = Field(..., description="QR 코드에서 추출된 URL")
+    phishing_result: PhishingDetectionResponse = Field(..., description="피싱 탐지 결과")
 
 # API 키 관련 모델들
 class APIKeyCreateRequest(BaseModel):
@@ -1303,3 +1317,156 @@ async def deactivate_api_key_post(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="API 키 비활성화 중 오류가 발생했습니다"
         )
+
+
+# ================================
+# QR 코드 관련 엔드포인트
+# ================================
+
+@router.post("/detect-phishing-qr", 
+    response_model=QRCodeDetectionResponse,
+    summary="QR 코드 피싱 탐지",
+    description="""
+    QR 코드 이미지를 업로드하여 피싱 사이트 여부를 판단합니다.
+    
+    ## 처리 과정
+    1. QR 코드 이미지에서 URL 추출
+    2. 추출된 URL로 기존 피싱 탐지 로직 실행
+    3. 피싱 탐지 결과 반환
+    
+    ## 지원 파일 형식
+    - PNG, JPEG, JPG, BMP, WEBP, GIF
+    
+    ## 반환 값
+    - extracted_url: QR 코드에서 추출된 URL
+    - phishing_result: 피싱 탐지 결과 (기존 탐지 API와 동일한 형식)
+    """)
+async def detect_phishing_from_qr(
+    file: UploadFile = File(..., description="QR 코드 이미지 파일"),
+    http_request: Request = None,
+    current_user: dict = get_optional_user_dep()
+):
+    """QR 코드에서 URL을 추출하고 피싱 탐지를 수행합니다."""
+    
+    try:
+        # 파일 유효성 검사
+        if file.content_type not in qr_service.ALLOWED_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"지원하지 않는 파일 형식입니다. 지원 형식: {', '.join(qr_service.ALLOWED_CONTENT_TYPES)}"
+            )
+        
+        # 파일 읽기
+        contents = await file.read()
+        
+        # QR 코드에서 URL 추출
+        try:
+            extracted_url = await qr_service.extract_url_from_qr_image(contents)
+            logger.info(f"QR 코드에서 URL 추출 완료: {extracted_url}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        ip_address = http_request.client.host if http_request else None
+        user_agent = http_request.headers.get("user-agent", "") if http_request else ""
+        
+        # 캐시 확인
+        cached_result = await phishing_cache_service.get_cached_result(extracted_url, user_id)
+        if cached_result:
+            logger.info(f"QR 피싱 탐지 - 캐시된 결과 사용: {extracted_url}")
+            phishing_result = PhishingDetectionResponse(**cached_result)
+        else:
+            # 웹 콘텐츠 수집 및 피싱 탐지
+            logger.info(f"QR 피싱 탐지 - 새로운 검사 시작: {extracted_url}")
+            collector = get_web_collector()
+            html_content, favicon_base64 = await collector.collect_web_content(extracted_url)
+            
+            if not html_content:
+                raise HTTPException(status_code=400, detail="웹 콘텐츠 수집에 실패했습니다")
+            
+            # 피싱 탐지 실행
+            result = await phishing_detector_base64(
+                url=extracted_url,
+                html=html_content,
+                favicon_b64=favicon_base64 or "",
+                brand_list=[],
+                user_id=user_id,
+                ip_address=ip_address,
+                user_agent=user_agent
+            )
+            
+            # 응답 형식 맞추기
+            response_data = {
+                "is_phish": result.get("is_phish", 0),
+                "reason": result.get("reason", ""),
+                "detected_brand": result.get("detected_brand"),
+                "confidence": result.get("similarity") or result.get("confidence"),
+                "url": extracted_url,
+                "from_cache": result.get("from_cache", False),
+                "detection_id": result.get("detection_id"),
+                "detection_time": result.get("detection_time", datetime.now().isoformat()),
+                "screenshot_base64": result.get("screenshot_base64"),
+                "is_crp": result.get("is_crp", False),
+                "processing_status": "cached" if result.get("from_cache", False) else "immediate"
+            }
+            
+            phishing_result = PhishingDetectionResponse(**response_data)
+        
+        logger.info(f"QR 피싱 탐지 완료: {extracted_url} -> {phishing_result.reason}")
+        
+        return QRCodeDetectionResponse(
+            extracted_url=extracted_url,
+            phishing_result=phishing_result
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"QR 피싱 탐지 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"QR 피싱 탐지 중 오류 발생: {str(e)}")
+
+
+@router.post("/generate-qr-code",
+    response_model=QRCodeGenerationResponse,
+    summary="QR 코드 생성",
+    description="""
+    URL을 입력받아 QR 코드를 생성합니다.
+    
+    ## 기능
+    - 로고 포함/미포함 QR 코드 생성 선택 가능
+    - 높은 복원률 설정으로 안정적인 인식 보장
+    - Base64 인코딩된 이미지 반환 (data URL 형식)
+    
+    ## 입력값
+    - text: QR 코드에 포함할 텍스트 (URL 권장)
+    - include_logo: 로고 포함 여부 (기본값: true)
+    
+    ## 반환값
+    - image_base64: Base64 인코딩된 QR 코드 이미지
+    - text: QR 코드에 포함된 텍스트
+    """)
+async def generate_qr_code(request: QRCodeGenerationRequest):
+    """URL을 QR 코드로 생성합니다."""
+    
+    try:
+        logger.info(f"QR 코드 생성 요청: {request.text}, 로고 포함: {request.include_logo}")
+        
+        # QR 코드 생성
+        if request.include_logo:
+            # 로고 포함 QR 코드 생성 (로고 경로는 서비스에서 설정된 기본값 사용)
+            image_base64 = await qr_service.generate_qr_code_with_logo(request.text)
+        else:
+            # 로고 없는 QR 코드 생성
+            image_base64 = await qr_service.generate_qr_code_with_logo(request.text, logo_path=None)
+        
+        logger.info(f"QR 코드 생성 완료: {request.text}")
+        
+        return QRCodeGenerationResponse(
+            image_base64=image_base64,
+            text=request.text
+        )
+        
+    except Exception as e:
+        logger.error(f"QR 코드 생성 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"QR 코드 생성 실패: {str(e)}")

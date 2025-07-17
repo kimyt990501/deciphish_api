@@ -38,6 +38,16 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     app.state.thread_pool = thread_pool
+    
+    # QR 서비스 로고 경로 설정
+    from app.services.qr_service import set_logo_path
+    from app.core.config import settings
+    
+    if settings.QR_LOGO_ENABLED and os.path.exists(settings.QR_LOGO_PATH):
+        set_logo_path(settings.QR_LOGO_PATH)
+        print(f"QR 로고 설정 완료: {settings.QR_LOGO_PATH}")
+    else:
+        print(f"QR 로고 파일이 없어 로고 없는 QR 코드로 동작합니다: {settings.QR_LOGO_PATH}")
 
 # 앱 종료 시 스레드풀 정리
 @app.on_event("shutdown")

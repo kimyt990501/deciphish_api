@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 -- 기본 관리자 계정 생성 (비밀번호: admin123)
 INSERT INTO users (username, email, password_hash, full_name, role) VALUES 
-('admin', 'admin@phishingdetector.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhM/2Rz8rYwK9pY7z5zN8e', 'System Administrator', 'admin')
+('admin', 'admin@phishingdetector.com', '$2b$12$TbYoz0GAFRC8RxwUvtDfSeY.LvcaaAmvVV.ztEcV0iMFv8MIVOme2', 'System Administrator', 'admin')
 ON DUPLICATE KEY UPDATE username=username;
 
 INSERT INTO users (username, email, password_hash, full_name, role) VALUES 

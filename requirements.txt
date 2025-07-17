@@ -39,6 +39,10 @@ faiss-cpu==1.11.0
 # 이미지 처리
 opencv-python==4.11.0.86
 
+# QR 코드 처리
+qrcode==8.0
+pyzbar==0.1.9
+
 # URL 처리
 tldextract==5.3.0
 

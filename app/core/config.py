@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     CONCURRENT_DETECTION_LIMIT: int = 10
     MAX_WORKERS: int = 4
     REQUEST_TIMEOUT: int = 30
+    
+    # QR 코드 설정
+    QR_LOGO_PATH: str = "static/logo.png"  # QR 코드에 포함할 로고 이미지 경로
+    QR_LOGO_ENABLED: bool = True  # 로고 포함 여부 기본값
 
     class Config:
         env_file = ".env"
