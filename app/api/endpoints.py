@@ -1455,10 +1455,10 @@ async def generate_qr_code(request: QRCodeGenerationRequest):
         # QR 코드 생성
         if request.include_logo:
             # 로고 포함 QR 코드 생성 (로고 경로는 서비스에서 설정된 기본값 사용)
-            image_base64 = await qr_service.generate_qr_code_with_logo(request.text)
+            image_base64 = await qr_service.generate_qr_code_with_logo(request.text, force_no_logo=False)
         else:
-            # 로고 없는 QR 코드 생성
-            image_base64 = await qr_service.generate_qr_code_with_logo(request.text, logo_path=None)
+            # 로고 없는 QR 코드 생성 (명시적으로 로고 제외)
+            image_base64 = await qr_service.generate_qr_code_with_logo(request.text, force_no_logo=True)
         
         logger.info(f"QR 코드 생성 완료: {request.text}")
         

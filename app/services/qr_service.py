@@ -112,13 +112,14 @@ class QRService:
             logger.error(f"QR 코드 URL 추출 실패: {e}")
             raise ValueError(f"QR 코드 처리 실패: {str(e)}")
     
-    async def generate_qr_code_with_logo(self, text: str, logo_path: Optional[str] = None) -> str:
+    async def generate_qr_code_with_logo(self, text: str, logo_path: Optional[str] = None, force_no_logo: bool = False) -> str:
         """
         로고가 포함된 QR 코드 생성
         
         Args:
             text: QR 코드에 포함할 텍스트 (URL)
             logo_path: 로고 이미지 경로 (선택사항)
+            force_no_logo: True일 경우 명시적으로 로고 제외
             
         Returns:
             Base64 인코딩된 QR 코드 이미지 (data URL 형태)
@@ -137,8 +138,14 @@ class QRService:
             # QR 코드 이미지 생성
             qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
             
-            # 로고 삽입 (로고 경로가 제공된 경우)
-            used_logo_path = logo_path or self.logo_path
+            # 로고 삽입 결정
+            used_logo_path = None
+            if not force_no_logo:
+                used_logo_path = logo_path or self.logo_path
+                logger.info(f"로고 포함 QR 코드 생성 시도: {used_logo_path}")
+            else:
+                logger.info("로고 없는 QR 코드 생성 (명시적 제외)")
+                
             if used_logo_path:
                 try:
                     # 로고 이미지 불러오기
