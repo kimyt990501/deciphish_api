@@ -14,6 +14,13 @@
 - **파비콘 분석**: CLIP 모델 기반 브랜드 로고 인식
 - **텍스트 분석**: Gemini LLM을 활용한 페이지 콘텐츠 분석
 - **도메인 패턴 분석**: 무료 DNS, IP 주소, 무작위 문자열 탐지
+- **QR 코드 피싱 탐지**: QR 코드에서 URL 추출 후 피싱 검사
+
+### QR 코드 처리 기능
+- **QR 코드 인식**: OpenCV 및 pyzbar 기반 이중 인식 시스템
+- **QR 코드 생성**: 로고 포함/미포함 선택 가능한 QR 코드 생성
+- **다중 포맷 지원**: PNG, JPEG, JPG, BMP, WEBP, GIF 형식 지원
+- **통합 피싱 검사**: QR 코드 → URL 추출 → 피싱 탐지 파이프라인
 
 ### 고급 보안 기능
 - **화이트리스트 검증**: 신뢰할 수 있는 도메인 자동 인식
@@ -38,6 +45,12 @@
 - **CLIP**: 파비콘 이미지 분석 및 브랜드 인식
 - **Gemini API**: 자연어 처리 및 텍스트 분석
 - **Custom CRP Classifier**: 피싱 패턴 분류
+
+### QR 코드 처리
+- **OpenCV**: QR 코드 이미지 처리 및 인식
+- **pyzbar**: 보조 QR 코드 디코딩 라이브러리
+- **qrcode**: QR 코드 생성 및 로고 삽입
+- **Pillow**: 이미지 처리 및 변환
 
 ### Infrastructure
 - **Docker**: 컨테이너화 및 배포
@@ -84,6 +97,10 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS=30
 # 환경 설정
 ENVIRONMENT=production
 DEBUG=false
+
+# QR 코드 설정
+QR_LOGO_PATH=static/logo.png
+QR_LOGO_ENABLED=true
 ```
 
 ### 3. Docker로 실행
@@ -236,8 +253,40 @@ curl -X POST "http://localhost:8300/api/v1/check_phish_simple" \
   }'
 ```
 
+### QR 코드 피싱 탐지
+
+```bash
+# QR 코드 이미지에서 URL 추출 후 피싱 탐지
+curl -X POST "http://localhost:8300/api/v1/detect-phishing-qr" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@qr_code_image.png"
+```
+
+### QR 코드 생성
+
+```bash
+# 로고 포함 QR 코드 생성
+curl -X POST "http://localhost:8300/api/v1/generate-qr-code" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "https://your-website.com",
+    "include_logo": true
+  }'
+
+# 로고 없는 QR 코드 생성
+curl -X POST "http://localhost:8300/api/v1/generate-qr-code" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "https://your-website.com",
+    "include_logo": false
+  }'
+```
+
 ### 응답 예시
 
+#### 피싱 탐지 응답
 ```json
 {
   "is_phish": 1,
@@ -255,6 +304,32 @@ curl -X POST "http://localhost:8300/api/v1/check_phish_simple" \
       "https://www.apple.com"
     ]
   }
+}
+```
+
+#### QR 코드 피싱 탐지 응답
+```json
+{
+  "extracted_url": "https://suspicious-site.com",
+  "phishing_result": {
+    "is_phish": 1,
+    "reason": "파비콘 기반 브랜드 매칭: Google 브랜드 유사도 0.89",
+    "detected_brand": "Google",
+    "confidence": 0.89,
+    "url": "https://suspicious-site.com",
+    "from_cache": false,
+    "detection_id": 12346,
+    "detection_time": "2025-01-17T14:31:20.654321",
+    "processing_status": "immediate"
+  }
+}
+```
+
+#### QR 코드 생성 응답
+```json
+{
+  "image_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXEAAAFxCAY...",
+  "text": "https://your-website.com"
 }
 ```
 
@@ -279,9 +354,12 @@ phishing_detector_api_new/
 │   │   ├── crp_classifier/           # CRP 분류 모델
 │   │   ├── favicon_service_clip_new/ # CLIP 기반 파비콘 분석
 │   │   ├── text_extractor_gemini/    # Gemini 텍스트 분석
+│   │   ├── qr_service.py             # QR 코드 처리 서비스
 │   │   ├── detector_service.py       # 탐지 서비스
 │   │   └── search_service.py         # 도메인 검색 서비스
 │   └── main.py                       # FastAPI 애플리케이션 진입점
+├── static/
+│   └── logo.png                      # QR 코드용 로고 이미지
 ├── mysql/
 │   └── init/                         # 데이터베이스 초기화 스크립트
 ├── docker-compose.yml               # 개발용 Docker 설정
@@ -364,6 +442,37 @@ pylint app/
 - **벡터 임베딩**: FAISS 인덱스 기반 고속 검색
 - **업데이트**: 신규 브랜드 자동 학습 및 추가
 
+### QR 코드 인식 엔진
+- **기본 엔진**: OpenCV QRCodeDetector
+- **보조 엔진**: pyzbar (OpenCV 실패시 자동 전환)
+- **지원 형식**: PNG, JPEG, JPG, BMP, WEBP, GIF
+- **처리 방식**: 이중 엔진 구조로 높은 인식률 보장
+
+## QR 코드 설정
+
+### 로고 설정
+QR 코드에 로고를 포함하려면 `static/logo.png` 파일을 배치하고 환경변수를 설정하세요.
+
+```bash
+# QR 코드용 로고 배치
+mkdir -p static
+cp your_logo.png static/logo.png
+
+# 환경변수 설정 (.env 파일)
+QR_LOGO_PATH=static/logo.png
+QR_LOGO_ENABLED=true
+```
+
+### API별 로고 제어
+각 QR 코드 생성 요청에서 개별적으로 로고 포함 여부를 결정할 수 있습니다.
+
+```json
+{
+  "text": "https://example.com",
+  "include_logo": true    // 요청별 로고 포함 여부 제어
+}
+```
+
 > **중요**: 모델 파일이 없으면 AI 기반 탐지 기능이 제한됩니다. 기본적인 URL 패턴 분석과 화이트리스트 검증만 작동합니다.
 
 ## 보안 고려사항
@@ -422,13 +531,22 @@ services:
 curl http://localhost:8300/api/v1/health
 ```
 
-### 통계 API
+### 주요 API 엔드포인트
 ```bash
-# 탐지 통계 조회
-curl -H "Authorization: Bearer TOKEN" \
-  http://localhost:8300/api/v1/statistics
+# 피싱 탐지 API
+POST /api/v1/detect-phishing/
+POST /api/v1/check_phish_simple
+POST /api/v1/detect-phishing-qr
 
-# 사용자별 히스토리
-curl -H "Authorization: Bearer TOKEN" \
-  http://localhost:8300/api/v1/my-history
+# QR 코드 API
+POST /api/v1/generate-qr-code
+
+# 인증 API
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+POST /api/v1/auth/refresh
+
+# 통계 및 히스토리
+GET /api/v1/statistics
+GET /api/v1/my-history
 ```
