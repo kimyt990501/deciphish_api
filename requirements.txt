@@ -56,6 +56,18 @@ python-jose[cryptography]==3.3.0
 playwright==1.40.0
 selenium==4.16.0
 
+# LangChain 관련 (호환 버전 자동 설정)
+langchain>=0.3.0,<0.4.0
+langchain-core>=0.3.0,<1.0.0
+langchain-openai>=0.2.0,<1.0.0
+langchain-google-genai>=1.0.0,<3.0.0
+
+# 임시: LangChain 문제 시 아래 4줄을 주석 처리하고 위 4줄을 제거하세요
+# langchain
+# langchain-core
+# langchain-openai  
+# langchain-google-genai
+
 # 추가 유틸리티
 aiofiles==23.2.1
 python-multipart==0.0.6 
