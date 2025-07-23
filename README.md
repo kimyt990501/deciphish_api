@@ -67,7 +67,7 @@
 
 ### 1. 저장소 클론
 ```bash
-git clone https://github.com/yourusername/phishing-detector-api.git
+git clone https://github.com/kimyt990501/phishing-detector-api.git
 cd phishing-detector-api
 ```
 
@@ -145,7 +145,7 @@ chmod +x docker-build.sh
 
 ### 4. AI 모델 다운로드 및 설정
 
-> **⚠️ 중요**: Docker 실행 전에 반드시 AI 모델을 배치해야 합니다.
+> **중요**: Docker 실행 전에 반드시 AI 모델을 배치해야 합니다.
 
 DeciPhish는 AI 기반 피싱 탐지를 위해 사전 훈련된 모델들을 사용합니다.
 
@@ -179,7 +179,7 @@ app/services/favicon_service_clip_new/data/embedding/
 └── (브랜드 임베딩 파일들)
 ```
 
-> **📝 참고**: 
+> **참고**: 
 > - 모델 파일은 크기가 크기 때문에 GitHub 저장소에는 포함되지 않습니다
 > - 훈련된 모델이 없으면 기본 기능만 작동하며, AI 기반 탐지는 비활성화됩니다
 > - 모델 파일이 누락된 경우 해당 기능은 자동으로 건너뛰어집니다
