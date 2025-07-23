@@ -45,6 +45,7 @@
 - **CLIP**: 파비콘 이미지 분석 및 브랜드 인식
 - **Gemini API**: 자연어 처리 및 텍스트 분석
 - **Custom CRP Classifier**: 피싱 패턴 분류
+- **LangChain**: 피싱 탐지 파이프라인 체인 관리 및 최적화
 
 ### QR 코드 처리
 - **OpenCV**: QR 코드 이미지 처리 및 인식
@@ -206,6 +207,57 @@ asyncio.run(brand_loader.load_brands())
 - **Redoc**: http://localhost:8300/redoc
 - **헬스체크**: http://localhost:8300/api/v1/health
 
+### 7. LangChain API 테스트
+
+새로운 LangChain 기반 피싱 탐지 API를 테스트해보세요:
+
+```bash
+# LangChain 기반 피싱 탐지 (풀 버전)
+curl -X POST "http://localhost:8300/detect-v2" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://google.com",
+    "use_manual_content": false
+  }'
+
+# LangChain 기반 간단 탐지 (URL만)
+curl -X POST "http://localhost:8300/check_phish_simple_v2" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://google.com"}'
+```
+
+**테스트 스크립트 실행:**
+```bash
+# 포함된 테스트 스크립트로 기존 API와 LangChain API 비교
+python test_langchain_api.py
+```
+
+#### LangChain API 특징
+- **LCEL 체인**: LangChain Expression Language로 구성된 유연한 파이프라인
+- **병렬 분석**: CRP, 파비콘, 텍스트 분석 동시 실행
+- **조건부 실행**: 리다이렉트/화이트리스트 우선 처리로 효율성 극대화
+- **향상된 관찰성**: 각 단계별 로깅 및 추적 가능
+- **기존 호환성**: 동일한 API 인터페이스 유지
+
+#### LangChain 응답 예시
+```json
+{
+  "is_phish": 0,
+  "reason": "favicon_brand_domain_match",
+  "detected_brand": "Google",
+  "confidence": 0.987,
+  "url": "https://google.com",
+  "langchain_execution": true,
+  "redirect_analysis": {
+    "has_redirect": false,
+    "suspicious_original": false
+  },
+  "processing_status": "langchain_immediate",
+  "detection_time": "2024-01-01T12:00:00",
+  "is_crp": false
+}
+```
+
 ## API 사용법
 
 ### 인증
@@ -256,8 +308,13 @@ curl -X POST "http://localhost:8300/api/v1/check_phish_simple" \
 ### QR 코드 피싱 탐지
 
 ```bash
-# QR 코드 이미지에서 URL 추출 후 피싱 탐지
+# QR 코드 이미지에서 URL 추출 후 피싱 탐지 (기존)
 curl -X POST "http://localhost:8300/api/v1/detect-phishing-qr" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -F "file=@qr_code_image.png"
+
+# QR 코드 피싱 탐지 (LangChain 기반)
+curl -X POST "http://localhost:8300/api/v1/detect-phishing-qr-v2" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -F "file=@qr_code_image.png"
 ```
@@ -307,7 +364,7 @@ curl -X POST "http://localhost:8300/api/v1/generate-qr-code" \
 }
 ```
 
-#### QR 코드 피싱 탐지 응답
+#### QR 코드 피싱 탐지 응답 (기존)
 ```json
 {
   "extracted_url": "https://suspicious-site.com",
@@ -321,6 +378,36 @@ curl -X POST "http://localhost:8300/api/v1/generate-qr-code" \
     "detection_id": 12346,
     "detection_time": "2025-01-17T14:31:20.654321",
     "processing_status": "immediate"
+  }
+}
+```
+
+#### QR 코드 피싱 탐지 응답 (LangChain 기반) 🆕
+```json
+{
+  "extracted_url": "https://suspicious-qr-site.com",
+  "phishing_result": {
+    "is_phish": 1,
+    "reason": "text_brand_domain_mismatch",
+    "detected_brand": "Apple",
+    "confidence": null,
+    "url": "https://www.apple-support.security-check.com",
+    "from_cache": false,
+    "detection_id": 12347,
+    "detection_time": "2025-01-17T14:35:42.123456",
+    "screenshot_base64": "data:image/png;base64,iVBORw0KGgoAAAA...",
+    "is_crp": false,
+    "processing_status": "langchain_immediate",
+    "langchain_execution": true,
+    "redirect_analysis": {
+      "has_redirect": true,
+      "redirect_count": 1,
+      "suspicious_original": false,
+      "suspicious_reason": "",
+      "redirect_chain": ["https://suspicious-qr-site.com", "https://www.apple-support.security-check.com"]
+    },
+    "original_url": "https://suspicious-qr-site.com",
+    "final_url": "https://www.apple-support.security-check.com"
   }
 }
 ```

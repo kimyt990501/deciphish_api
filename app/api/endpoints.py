@@ -1712,3 +1712,163 @@ async def generate_qr_code(request: QRCodeGenerationRequest):
     except Exception as e:
         logger.error(f"QR 코드 생성 실패: {e}")
         raise HTTPException(status_code=500, detail=f"QR 코드 생성 실패: {str(e)}")
+
+
+@router.post("/detect-phishing-qr-v2", 
+    response_model=QRCodeDetectionResponse,
+    summary="QR 코드 피싱 탐지 (LangChain 기반)",
+    description="""
+    QR 코드 이미지를 업로드하여 LangChain 기반으로 피싱 사이트 여부를 판단합니다.
+    
+    ## 특징
+    * LangChain LCEL 체인 실행
+    * 향상된 로깅 및 관찰성
+    * 리다이렉트 정보 수집
+    * 올바른 순서의 피싱 탐지 (화이트리스트 → CRP → 파비콘 → 텍스트)
+    
+    ## 처리 과정
+    1. QR 코드 이미지에서 URL 추출
+    2. 캐시 확인
+    3. 웹 콘텐츠 수집 및 리다이렉트 분석
+    4. LangChain 체인 실행:
+       - 화이트리스트 확인
+       - CRP 검사
+       - 파비콘 브랜드 탐지
+       - 텍스트 브랜드 추출
+       - DB 브랜드 확인 및 도메인 매칭
+    5. 피싱 탐지 결과 반환
+    
+    ## 지원 파일 형식
+    - PNG, JPEG, JPG, BMP, WEBP, GIF
+    
+    ## 응답 특징
+    * `langchain_execution: true` 필드로 LangChain 실행 여부 표시
+    * 기존 QR API와 동일한 응답 형식 유지
+    * 리다이렉트 분석 정보 포함
+    """)
+async def detect_phishing_from_qr_langchain(
+    file: UploadFile = File(..., description="QR 코드 이미지 파일"),
+    http_request: Request = None,
+    current_user: dict = get_optional_user_dep()
+):
+    """QR 코드에서 URL을 추출하고 LangChain 기반으로 피싱 탐지를 수행합니다."""
+    
+    try:
+        # 파일 유효성 검사
+        if file.content_type not in qr_service.ALLOWED_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"지원하지 않는 파일 형식입니다. 지원 형식: {', '.join(qr_service.ALLOWED_CONTENT_TYPES)}"
+            )
+        
+        # 파일 읽기
+        contents = await file.read()
+        
+        # QR 코드에서 URL 추출
+        try:
+            extracted_url = await qr_service.extract_url_from_qr_image(contents)
+            logger.info(f"QR 코드에서 URL 추출 완료: {extracted_url}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        ip_address = http_request.client.host if http_request else None
+        user_agent = http_request.headers.get("user-agent", "") if http_request else ""
+        
+        logger.info(f"LangChain QR 피싱 탐지 요청: {extracted_url} (사용자: {user_id})")
+        
+        # 캐시 확인
+        cached_result = await phishing_cache_service.get_cached_result(extracted_url, user_id)
+        if cached_result:
+            logger.info(f"QR 피싱 탐지 - 캐시된 결과 사용: {extracted_url}")
+            
+            # 캐시 결과에 누락된 필드들 보완
+            cached_result["langchain_execution"] = False
+            cached_result["from_cache"] = True
+            
+            # 기존 API 호환성을 위한 추가 필드들
+            if "crp_detected" not in cached_result:
+                cached_result["crp_detected"] = cached_result.get("is_crp", False)
+            if "redirect_analysis" not in cached_result:
+                cached_result["redirect_analysis"] = None
+            
+            phishing_result = PhishingDetectionResponse(**cached_result)
+        else:
+            # 웹 콘텐츠 수집 및 리다이렉트 분석
+            logger.info(f"QR 피싱 탐지 - 웹 콘텐츠 수집 및 리다이렉트 분석 시작: {extracted_url}")
+            
+            # 리다이렉트 분석 (정보 수집만)
+            from app.pipeline.phishing_pipeline import get_final_url
+            final_url, redirect_analysis = await get_final_url(extracted_url)
+            
+            logger.info(f"QR 리다이렉트 분석 완료: {redirect_analysis}")
+            
+            # 최종 URL로 웹 콘텐츠 수집
+            collector = get_web_collector()
+            html_content, favicon_base64 = await collector.collect_web_content(final_url)
+            
+            if not html_content:
+                raise HTTPException(status_code=400, detail="웹 콘텐츠 수집에 실패했습니다")
+            
+            logger.info(f"QR 웹 콘텐츠 수집 완료: HTML {len(html_content)}자, 파비콘 {'있음' if favicon_base64 else '없음'}")
+            
+            # LangChain 체인 실행
+            langchain_detector = get_langchain_phishing_detector()
+            
+            chain_inputs = {
+                "url": final_url,
+                "html": html_content,
+                "favicon_b64": favicon_base64 or "",
+                "user_id": user_id,
+                "ip_address": ip_address,
+                "user_agent": user_agent,
+                "redirect_analysis": redirect_analysis,
+                "original_url": extracted_url
+            }
+            
+            # LangChain 체인 실행
+            result = await langchain_detector.ainvoke(chain_inputs)
+            
+            # LangChain 실행 표시 추가
+            result["langchain_execution"] = result.get("langchain_execution", True)
+            
+            # detection_time 추가
+            if not result.get("detection_time"):
+                result["detection_time"] = datetime.now().isoformat()
+            
+            logger.info(f"QR LangChain 피싱 탐지 완료: {extracted_url} → {result.get('reason', 'Unknown')}")
+            
+            # 응답 형식 맞추기 (기존 QR API와 호환성 유지)
+            response_data = {
+                "is_phish": result.get("is_phish", 0),
+                "reason": result.get("reason", ""),
+                "detected_brand": result.get("detected_brand"),
+                "confidence": result.get("similarity") or result.get("confidence"),
+                "url": final_url,
+                "from_cache": result.get("from_cache", False),
+                "detection_id": result.get("detection_id"),
+                "detection_time": result.get("detection_time"),
+                "screenshot_base64": result.get("screenshot_base64"),
+                "is_crp": result.get("is_crp", False),
+                "processing_status": "langchain_immediate",
+                "langchain_execution": result.get("langchain_execution", True),
+                "redirect_analysis": result.get("redirect_analysis"),
+                "original_url": extracted_url,
+                "final_url": final_url
+            }
+            
+            phishing_result = PhishingDetectionResponse(**response_data)
+        
+        logger.info(f"LangChain QR 피싱 탐지 최종 완료: {extracted_url} -> {phishing_result.reason}")
+        
+        return QRCodeDetectionResponse(
+            extracted_url=extracted_url,
+            phishing_result=phishing_result
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"LangChain QR 피싱 탐지 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"LangChain QR 피싱 탐지 중 오류 발생: {str(e)}")
