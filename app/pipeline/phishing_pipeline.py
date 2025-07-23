@@ -385,7 +385,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
         # 파비콘으로 브랜드 탐지 시도
         if favicon_b64 and favicon_b64.strip():
             try:
-                brand_from_favicon = detect_brand_from_favicon(favicon_b64, url, threshold=0.98)
+                brand_from_favicon = detect_brand_from_favicon(favicon_b64, url, threshold=0.999)
                 if brand_from_favicon:
                     detected_brand = brand_from_favicon["name"]
                     print(f"의심스러운 리다이렉트에서 브랜드 탐지: {detected_brand}")
@@ -448,7 +448,7 @@ async def phishing_detector_base64(url, html, favicon_b64, brand_list, user_id=N
     # 3. 파비콘 기반 탐지 (CLIP 모델) - favicon이 있는 경우에만
     if favicon_b64 and favicon_b64.strip():
         print(f"파비콘 데이터 존재, 크기: {len(favicon_b64)} 바이트")
-        brand_from_favicon = detect_brand_from_favicon(favicon_b64, url, threshold=0.98)
+        brand_from_favicon = detect_brand_from_favicon(favicon_b64, url, threshold=0.999)
         print(f"파비콘 탐지 결과: {brand_from_favicon}")
         
         if brand_from_favicon:

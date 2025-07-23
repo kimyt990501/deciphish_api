@@ -13,6 +13,7 @@ from app.services.api_key_service import api_key_service
 from app.core.auth_middleware import get_current_user_dep, get_current_active_user_dep, require_admin, require_user, get_optional_user_dep
 from app.core.config import settings
 from app.services.qr_service import qr_service
+from app.chains.phishing_detection_chain import get_langchain_phishing_detector
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,6 +43,9 @@ class PhishingDetectionResponse(BaseModel):
     redirect_url: Optional[str] = Field(None, description="리다이렉트된 최종 URL")
     is_crp: Optional[bool] = Field(False, description="CRP(Content Replacement Prevention) 탐지 여부")
     processing_status: Optional[str] = Field(None, description="처리 상태 (immediate, background, cached)")
+    # LangChain 관련 필드
+    langchain_execution: Optional[bool] = Field(False, description="LangChain으로 실행되었는지 여부")
+    redirect_analysis: Optional[Dict] = Field(None, description="리다이렉트 분석 상세 결과")
 
 class HealthResponse(BaseModel):
     status: str = Field(..., description="서비스 상태")
@@ -270,6 +274,244 @@ async def detect_phishing(request: URLRequest, http_request: Request, current_us
     except Exception as e:
         logger.error(f"피싱 탐지 실패: {e}")
         raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+
+@router.post("/detect-v2", 
+    summary="피싱 사이트 탐지 (LangChain 기반)",
+    description="""
+    LangChain 기반의 새로운 피싱 사이트 탐지 API입니다.
+    
+    ## 특징
+    * LangChain의 LCEL(LangChain Expression Language) 사용
+    * 병렬 AI 분석 (CRP + 파비콘 + 텍스트)
+    * 조건부 실행 체인 (리다이렉트/화이트리스트 우선 처리)
+    * 향상된 로깅 및 관찰성
+    
+    ## 처리 과정
+    1. 리다이렉트 분석 → 의심스러우면 즉시 피싱 판단
+    2. 화이트리스트 확인 → 신뢰 도메인이면 즉시 정상 판단  
+    3. 병렬 AI 분석: CRP 분류 + 파비콘 브랜드 탐지 + 텍스트 브랜드 추출
+    4. 도메인 매칭을 통한 최종 판단
+    
+    ## 응답 특징
+    * `langchain_execution: true` 필드로 LangChain 실행 여부 표시
+    * 기존 API와 동일한 응답 형식 유지
+    """)
+async def detect_phishing_langchain(request: PhishingDetectionRequest, http_request: Request, current_user: dict = get_optional_user_dep()):
+    """
+    LangChain 기반 피싱 사이트 탐지 API
+    
+    기존 파이프라인을 LangChain의 체인으로 재구성하여 더 유연하고 관찰 가능한 피싱 탐지를 제공합니다.
+    """
+    try:
+        url = str(request.url)
+        
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        ip_address = http_request.client.host
+        user_agent = http_request.headers.get("user-agent", "")
+        
+        logger.info(f"LangChain 피싱 탐지 요청: {url} (사용자: {user_id})")
+        
+        # 캐시 확인 먼저 수행 (LangChain 실행 전)
+        cached_result = await phishing_cache_service.get_cached_result(url, user_id)
+        if cached_result:
+            logger.info(f"캐시된 결과 반환 (LangChain 건너뛰기): {url} (사용자: {user_id})")
+            
+            # 캐시 결과에 누락된 필드들 보완
+            cached_result["langchain_execution"] = False
+            cached_result["from_cache"] = True
+            
+            # 기존 API 호환성을 위한 추가 필드들
+            if "crp_detected" not in cached_result:
+                cached_result["crp_detected"] = cached_result.get("is_crp", False)
+            if "redirect_analysis" not in cached_result:
+                cached_result["redirect_analysis"] = None
+            
+            # 기존 detect-phishing과 동일한 형식으로 반환 (딕셔너리)
+            return cached_result
+        
+        # 3. 웹 콘텐츠 수집 및 리다이렉트 검사
+        redirect_analysis = None
+        original_url = url
+        
+        if request.use_manual_content and request.html_content:
+            # 수동 컨텐츠 사용 (리다이렉트 검사 생략)
+            html_content = request.html_content
+            favicon_base64 = request.favicon_base64
+            logger.info("수동 제공된 콘텐츠 사용")
+            redirect_analysis = {
+                "has_redirect": False,
+                "redirect_count": 0,
+                "suspicious_original": False,
+                "suspicious_reason": "",
+                "redirect_chain": []
+            }
+        else:
+            # 자동 콘텐츠 수집 + 리다이렉트 검사
+            logger.info(f"웹 콘텐츠 수집 및 리다이렉트 검사 시작: {url}")
+            
+            # 리다이렉트 분석 (정보 수집만, 즉시 판단하지 않음)
+            from app.pipeline.phishing_pipeline import get_final_url
+            final_url, redirect_analysis = await get_final_url(url)
+            
+            logger.info(f"리다이렉트 분석 완료: {redirect_analysis}")
+            
+            # 최종 URL로 콘텐츠 수집 (리다이렉트 여부와 관계없이)
+            url = final_url  # 최종 URL로 업데이트
+            collector = get_web_collector()
+            html_content, favicon_base64 = await collector.collect_web_content(url)
+            
+            if not html_content:
+                raise HTTPException(status_code=400, detail="Failed to collect web content")
+            
+            logger.info(f"웹 콘텐츠 수집 완료: HTML {len(html_content)}자, 파비콘 {'있음' if favicon_base64 else '없음'}")
+            logger.info(f"리다이렉트 분석: {redirect_analysis}")
+        
+        # 4-9. LangChain 체인 실행 (정상 경우)
+        langchain_detector = get_langchain_phishing_detector()
+        
+        chain_inputs = {
+            "url": url,
+            "html": html_content,
+            "favicon_b64": favicon_base64 or "",
+            "user_id": user_id,
+            "ip_address": ip_address,
+            "user_agent": user_agent,
+            "redirect_analysis": redirect_analysis,
+            "original_url": original_url
+        }
+        
+        # LangChain 체인 실행
+        result = await langchain_detector.ainvoke(chain_inputs)
+        
+        # LangChain 실행 표시 추가 (기존 응답 형식 유지)
+        result["langchain_execution"] = result.get("langchain_execution", True)
+        
+        # detection_time 추가 (캐시에서 온 경우가 아니면 현재 시간)
+        if not result.get("detection_time"):
+            result["detection_time"] = datetime.now().isoformat()
+        
+        logger.info(f"LangChain 피싱 탐지 완료: {url} → {result.get('reason', 'Unknown')}")
+        
+        # 기존 detect-phishing과 동일한 형식으로 반환 (딕셔너리 그대로)
+        return result
+        
+    except HTTPException:
+        # HTTP 예외는 그대로 re-raise
+        raise
+    except Exception as e:
+        logger.error(f"LangChain 피싱 탐지 실패: {url} - {e}")
+        raise HTTPException(status_code=500, detail=f"LangChain detection failed: {str(e)}")
+
+@router.post("/check_phish_simple_v2",
+    summary="피싱 사이트 탐지 (URL만, LangChain 기반)",
+    description="""
+    URL만 받아서 LangChain 기반으로 피싱 사이트 여부를 판단하는 간단한 API입니다.
+    
+    ## 특징
+    * LangChain LCEL 체인 실행
+    * 기존 `/check_phish_simple`과 동일한 인터페이스
+    * 향상된 로깅 및 트레이싱
+    
+    ## 응답 형식
+    ```json
+    {
+        "result": {
+            "is_phish": 0,
+            "reason": "no_brand_detected", 
+            "detected_brand": null,
+            "langchain_execution": true
+        }
+    }
+    ```
+    """)
+async def check_phish_simple_langchain(payload: SimplePhishingRequest, http_request: Request, current_user: dict = get_optional_user_dep()):
+    """LangChain 기반 간단한 피싱 탐지 (URL만 입력)"""
+    try:
+        url = str(payload.url)
+        logger.info(f"LangChain 심플 피싱 탐지 요청: {url}")
+        
+        # 사용자 정보 추출
+        user_id = current_user.get("id") if current_user else None
+        ip_address = http_request.client.host
+        user_agent = http_request.headers.get("user-agent", "")
+        
+        # 1. 캐시 확인 먼저
+        cached_result = await phishing_cache_service.get_cached_result(url, user_id)
+        if cached_result:
+            logger.info(f"캐시된 결과 반환 (LangChain 심플): {url}")
+            
+            # 캐시 결과에 누락된 필드들 보완
+            cached_result["langchain_execution"] = False
+            cached_result["from_cache"] = True
+            
+            # 기존 API 호환성을 위한 추가 필드들
+            if "crp_detected" not in cached_result:
+                cached_result["crp_detected"] = cached_result.get("is_crp", False)
+            if "redirect_analysis" not in cached_result:
+                cached_result["redirect_analysis"] = None
+            
+            return {"result": cached_result}
+        
+        # 2. 웹 콘텐츠 수집
+        logger.info(f"웹 콘텐츠 수집 시작: {url}")
+        collector = get_web_collector()
+        html_content, favicon_base64 = await collector.collect_web_content(url)
+        
+        if not html_content:
+            logger.error(f"웹 콘텐츠 수집 실패: {url}")
+            return {"result": {
+                "is_phish": 0,
+                "reason": "content_collection_failed",
+                "detected_brand": None,
+                "error": "Failed to collect web content",
+                "langchain_execution": False
+            }}
+        
+        # 3. LangChain 체인 실행
+        langchain_detector = get_langchain_phishing_detector()
+        
+        # 심플 API에서는 리다이렉트 분석 생략 (기본값 설정)
+        simple_redirect_analysis = {
+            "has_redirect": False,
+            "redirect_count": 0,
+            "suspicious_original": False,
+            "suspicious_reason": "",
+            "redirect_chain": []
+        }
+        
+        chain_inputs = {
+            "url": url,
+            "html": html_content,
+            "favicon_b64": favicon_base64 or "",
+            "user_id": user_id,
+            "ip_address": ip_address,
+            "user_agent": user_agent,
+            "redirect_analysis": simple_redirect_analysis,
+            "original_url": url
+        }
+        
+        result = await langchain_detector.ainvoke(chain_inputs)
+        
+        # detection_time 추가
+        if not result.get("detection_time"):
+            result["detection_time"] = datetime.now().isoformat()
+        
+        # LangChain 체인에서 이미 DB 저장이 완료됨
+        
+        logger.info(f"LangChain 심플 피싱 탐지 완료: {url} → {result.get('reason', 'Unknown')}")
+        
+        return {"result": result}
+        
+    except Exception as e:
+        logger.error(f"LangChain 심플 피싱 탐지 실패: {url} - {e}")
+        return {"result": {
+            "is_phish": 0,
+            "reason": f"langchain_simple_error: {str(e)}",
+            "detected_brand": None,
+            "error": str(e),
+            "langchain_execution": True
+        }}
 
 @router.post("/detect-phishing-manual/")
 async def detect_phishing_manual(request: ManualDetectionRequest):

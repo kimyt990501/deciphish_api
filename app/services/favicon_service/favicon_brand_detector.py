@@ -109,7 +109,7 @@ def match_logo_with_threshold(embedding, url, strict_threshold=0.3, loose_thresh
     # 매칭 실패
     return {"match": candidates[0] if candidates else None, "confidence": "low", "reason": "no_match"}
 
-def detect_brand_from_favicon(favicon_base64: str, url: str = "", threshold: float = 0.98) -> Optional[Dict]:
+def detect_brand_from_favicon(favicon_base64: str, url: str = "", threshold: float = 0.999) -> Optional[Dict]:
     """
     파비콘에서 브랜드 탐지 (기존 logo_brand_extractor 로직 사용)
     
@@ -128,7 +128,7 @@ def detect_brand_from_favicon(favicon_base64: str, url: str = "", threshold: flo
         # CLIP 임베딩 추출
         emb = extract_clip_embedding_from_pil(favicon_img)
         
-        # 브랜드 매칭 - threshold를 거리로 변환 (유사도 0.98 = 거리 0.02)
+        # 브랜드 매칭 - threshold를 거리로 변환 (유사도 0.999 = 거리 0.001)
         distance_threshold = 1.0 - threshold
         result = match_logo_with_threshold(emb, url, strict_threshold=distance_threshold, loose_threshold=distance_threshold)
         
